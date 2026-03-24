@@ -29,7 +29,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "vitest": "^4.0.0"
+    "vitest": "^4.1.1"
   },
   "engines": {
     "node": ">=23.6.0"
