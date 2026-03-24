@@ -1,6 +1,6 @@
 {
   "name": "vt100.js",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Pure TypeScript VT100 terminal emulator. Zero dependencies, headless, fast.",
   "keywords": [
     "ansi",
@@ -16,34 +16,22 @@
   "license": "MIT",
   "author": "Beorn",
   "repository": "github:beorn/vt100",
-  "files": [
-    "dist",
-    "src"
-  ],
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
   "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
+    ".": "./src/index.ts"
   },
+  "files": ["src"],
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "build": "tsc",
-    "prepublishOnly": "bun run build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "typescript": "^5.7.3",
     "vitest": "^4.0.0"
   },
   "engines": {
-    "bun": ">=1.0.0",
-    "node": ">=18"
+    "node": ">=23.6.0"
   }
 }
