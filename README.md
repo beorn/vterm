@@ -4,9 +4,9 @@ VT terminal emulator monorepo. Pure TypeScript, zero dependencies.
 
 ## Packages
 
-| Package | npm | Description |
-|---------|-----|-------------|
-| [vt100.js](packages/vt100/) | [`vt100.js`](https://www.npmjs.com/package/vt100.js) | VT100-era terminal emulator — SGR, cursor, scroll regions, alt screen |
+| Package                     | npm                                                  | Description                                                                      |
+| --------------------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [vt100.js](packages/vt100/) | [`vt100.js`](https://www.npmjs.com/package/vt100.js) | VT100-era terminal emulator — SGR, cursor, scroll regions, alt screen            |
 | [vterm.js](packages/vterm/) | [`vterm.js`](https://www.npmjs.com/package/vterm.js) | Modern terminal emulator — 100% of [terminfo.dev](https://terminfo.dev) features |
 
 ## Why two packages?

@@ -7,10 +7,10 @@
   "license": "MIT",
   "author": "Beorn",
   "repository": "github:beorn/vterm",
-  "type": "module",
   "workspaces": [
     "packages/*"
   ],
+  "type": "module",
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
