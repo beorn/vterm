@@ -16,10 +16,12 @@
  * - Focus tracking (mode 1004)
  * - Application cursor keys & keypad
  * - Synchronized output (mode 2026)
+ * - Kitty keyboard protocol (CSI u / progressive enhancement)
  * - Scrollback buffer with configurable limit
  * - Wide character support (CJK, emoji ZWJ, regional indicators, VS-16)
  * - OSC sequences (title, hyperlinks, clipboard, colors)
  * - DCS sequences (consumed and ignored, XTVERSION response)
+ * - APC sequences (Kitty graphics protocol — parsed, query responses)
  * - DA1/DA2/DA3 device attribute responses
  * - DSR (device status report) responses
  * - DECRPM (mode reporting)
@@ -67,6 +69,18 @@ export interface ScreenOptions {
   onResponse?: (data: string) => void
 }
 
+export interface SemanticZone {
+  type: "prompt" | "command" | "output"
+  startRow: number
+  startCol: number
+}
+
+export interface SixelImage {
+  data: string
+  row: number // cursor row when sixel started
+  col: number // cursor col when sixel started
+}
+
 export interface Screen {
   readonly cols: number
   readonly rows: number
@@ -91,6 +105,9 @@ export interface Screen {
   getScrollbackLength(): number
   getViewportOffset(): number
   scrollViewport(delta: number): void
+
+  getSemanticZones(): SemanticZone[]
+  getSixelImages(): SixelImage[]
 }
 
 // ── Implementation ─────────────────────────────────────────────────────
@@ -183,11 +200,27 @@ const DEC_SPECIAL_GRAPHICS: Record<string, string> = {
   "}": "\u00a3", // £
 }
 
-// ── Unicode width (simplified — CJK detection) ─────────────────────────
+// ── Unicode width & character classification ────────────────────────────
 
 function isWide(codePoint: number): boolean {
   return (
     (codePoint >= 0x1100 && codePoint <= 0x115f) || // Hangul Jamo
+    (codePoint >= 0x231a && codePoint <= 0x231b) || // Watch, Hourglass
+    (codePoint >= 0x2614 && codePoint <= 0x2615) || // Umbrella, Hot Beverage
+    (codePoint >= 0x2648 && codePoint <= 0x2653) || // Zodiac signs
+    codePoint === 0x267f || // Wheelchair
+    codePoint === 0x2693 || // Anchor
+    codePoint === 0x26a1 || // High Voltage
+    codePoint === 0x26ce || // Ophiuchus
+    codePoint === 0x26d4 || // No Entry
+    codePoint === 0x2705 || // Check Mark
+    codePoint === 0x2728 || // Sparkles
+    codePoint === 0x274c || // Cross Mark
+    codePoint === 0x274e || // Cross Mark variant
+    (codePoint >= 0x2753 && codePoint <= 0x2755) || // Question marks
+    (codePoint >= 0x2795 && codePoint <= 0x2797) || // Plus, Minus, Division
+    codePoint === 0x27b0 || // Curly Loop
+    codePoint === 0x27bf || // Double Curly Loop
     (codePoint >= 0x2e80 && codePoint <= 0x303e) || // CJK Radicals
     (codePoint >= 0x3041 && codePoint <= 0x33bf) || // Hiragana, Katakana, Bopomofo, etc.
     (codePoint >= 0x3400 && codePoint <= 0x4dbf) || // CJK Unified Extension A
@@ -199,11 +232,67 @@ function isWide(codePoint: number): boolean {
     (codePoint >= 0xfe30 && codePoint <= 0xfe6b) || // CJK Compatibility Forms
     (codePoint >= 0xff01 && codePoint <= 0xff60) || // Fullwidth Forms
     (codePoint >= 0xffe0 && codePoint <= 0xffe6) || // Fullwidth Signs
+    codePoint === 0x1f004 || // Mahjong Tile
+    codePoint === 0x1f0cf || // Playing Card
+    (codePoint >= 0x1f170 && codePoint <= 0x1f171) || // A/B buttons
+    (codePoint >= 0x1f17e && codePoint <= 0x1f17f) || // O/P buttons
+    codePoint === 0x1f18e || // AB button
+    (codePoint >= 0x1f191 && codePoint <= 0x1f19a) || // Squared symbols
+    (codePoint >= 0x1f1e6 && codePoint <= 0x1f1ff) || // Regional Indicators
+    (codePoint >= 0x1f200 && codePoint <= 0x1f202) || // Enclosed CJK
     (codePoint >= 0x1f300 && codePoint <= 0x1f9ff) || // Misc Symbols/Emoticons
     (codePoint >= 0x1fa00 && codePoint <= 0x1faff) || // Extended Symbols & Pictographs
     (codePoint >= 0x20000 && codePoint <= 0x2fffd) || // CJK Extension B-F
     (codePoint >= 0x30000 && codePoint <= 0x3fffd) // CJK Extension G+
   )
+}
+
+function isCombining(cp: number): boolean {
+  return (
+    (cp >= 0x0300 && cp <= 0x036f) || // Combining Diacritical Marks
+    (cp >= 0x0483 && cp <= 0x0489) || // Cyrillic combining
+    (cp >= 0x0591 && cp <= 0x05bd) || // Hebrew
+    cp === 0x05bf || // Hebrew
+    (cp >= 0x05c1 && cp <= 0x05c2) || // Hebrew
+    (cp >= 0x05c4 && cp <= 0x05c5) || // Hebrew
+    cp === 0x05c7 || // Hebrew
+    (cp >= 0x0610 && cp <= 0x061a) || // Arabic
+    (cp >= 0x064b && cp <= 0x065f) || // Arabic
+    cp === 0x0670 || // Arabic
+    (cp >= 0x06d6 && cp <= 0x06dc) || // Arabic
+    (cp >= 0x06df && cp <= 0x06e4) || // Arabic
+    (cp >= 0x06e7 && cp <= 0x06e8) || // Arabic
+    (cp >= 0x06ea && cp <= 0x06ed) || // Arabic
+    (cp >= 0x0730 && cp <= 0x074a) || // Syriac
+    (cp >= 0x0900 && cp <= 0x0903) || // Devanagari
+    (cp >= 0x093a && cp <= 0x094f) || // Devanagari
+    (cp >= 0x0951 && cp <= 0x0957) || // Devanagari
+    (cp >= 0x0962 && cp <= 0x0963) || // Devanagari
+    cp === 0x0e31 || // Thai
+    (cp >= 0x0e34 && cp <= 0x0e3a) || // Thai
+    (cp >= 0x0e47 && cp <= 0x0e4e) || // Thai
+    (cp >= 0x1ab0 && cp <= 0x1aff) || // Combining Diacritical Marks Extended
+    (cp >= 0x1dc0 && cp <= 0x1dff) || // Combining Diacritical Marks Supplement
+    (cp >= 0x20d0 && cp <= 0x20ff) || // Combining Diacritical Marks for Symbols
+    (cp >= 0xfe00 && cp <= 0xfe0f) || // Variation Selectors
+    (cp >= 0xe0100 && cp <= 0xe01ef) // Variation Selectors Supplement
+  )
+}
+
+function isRegionalIndicator(cp: number): boolean {
+  return cp >= 0x1f1e6 && cp <= 0x1f1ff
+}
+
+function isZWJ(cp: number): boolean {
+  return cp === 0x200d
+}
+
+function isVS16(cp: number): boolean {
+  return cp === 0xfe0f
+}
+
+function isEmojiModifier(cp: number): boolean {
+  return cp >= 0x1f3fb && cp <= 0x1f3ff // Skin tone modifiers
 }
 
 // ── Internal attrs interface ───────────────────────────────────────────
@@ -286,6 +375,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let reverseVideo = false
   let syncOutput = false
 
+  // Kitty keyboard protocol
+  let kittyKeyboardFlags = 0
+  let kittyKeyboardStack: number[] = []
+
+  // Kitty graphics protocol
+  let hasKittyGraphics = false
+
   // Scroll region (inclusive, 0-based)
   let scrollTop = 0
   let scrollBottom = rows - 1
@@ -299,8 +395,24 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // Clipboard (OSC 52)
   let clipboard = ""
 
+  // Semantic prompt zones (OSC 133)
+  let semanticZones: SemanticZone[] = []
+
+  // Sixel graphics (DCS q)
+  let hasSixel = false
+  let sixelImages: SixelImage[] = []
+
+  // Soft-wrap tracking: true if the line break at end of this row was caused by auto-wrap
+  let mainSoftWrapped: boolean[] = new Array(rows).fill(false)
+  let altSoftWrapped: boolean[] = new Array(rows).fill(false)
+  let softWrapped = mainSoftWrapped
+
   // Last printed character for REP
   let lastChar = ""
+
+  // Unicode sequence state
+  let pendingRegionalIndicator: string | null = null // First RI waiting for pair
+  let afterZWJ = false // Next character should join with previous cell
 
   // Parser state
   let parserState:
@@ -312,9 +424,15 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     | "dcs"
     | "dcs_passthrough"
     | "osc_st"
-    | "dcs_st" = "ground"
+    | "dcs_st"
+    | "apc"
+    | "apc_st" = "ground"
   let escBuf = ""
   let oscBuf = ""
+  let dcsBuf = ""
+  let dcsStartRow = 0
+  let dcsStartCol = 0
+  let apcBuf = ""
 
   // Decoder for incoming bytes
   const decoder = new TextDecoder()
@@ -374,18 +492,70 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
     for (let i = top; i < bottom; i++) {
       grid[i] = grid[i + 1]!
+      softWrapped[i] = softWrapped[i + 1]!
     }
     grid[bottom] = makeRow(cols)
+    softWrapped[bottom] = false
   }
 
   function scrollDown(top: number, bottom: number): void {
     for (let i = bottom; i > top; i--) {
       grid[i] = grid[i - 1]!
+      softWrapped[i] = softWrapped[i - 1]!
     }
     grid[top] = makeRow(cols)
+    softWrapped[top] = false
   }
 
   // ── Character writing ──
+
+  /** Find the previous non-spacer cell (the cell before curX, skipping wide-char spacers) */
+  function getPrevCell(): { cell: ScreenCell; col: number } | null {
+    if (curX === 0 && curY === 0) return null
+    let prevCol = curX - 1
+    let prevRow = curY
+    if (prevCol < 0) {
+      prevRow--
+      if (prevRow < 0) return null
+      prevCol = cols - 1
+    }
+    const row = grid[prevRow]!
+    let cell = row[prevCol]!
+    // If we landed on a spacer (empty char after a wide character), go back one more
+    if (cell !== EMPTY_CELL && cell.char === "" && prevCol > 0) {
+      prevCol--
+      cell = row[prevCol]!
+    }
+    if (cell === EMPTY_CELL) return null
+    return { cell, col: prevCol }
+  }
+
+  /** Widen a cell to 2 columns, adding a spacer cell after it */
+  function widenCell(row: ScreenCell[], col: number, cell: ScreenCell): void {
+    cell.wide = true
+    if (col + 1 < cols) {
+      let spacer = row[col + 1]!
+      if (spacer === EMPTY_CELL) {
+        spacer = { ...EMPTY_CELL }
+        row[col + 1] = spacer
+      }
+      spacer.char = ""
+      spacer.fg = null
+      spacer.bg = null
+      spacer.bold = false
+      spacer.faint = false
+      spacer.italic = false
+      spacer.underline = "none"
+      spacer.underlineColor = null
+      spacer.overline = false
+      spacer.strikethrough = false
+      spacer.inverse = false
+      spacer.hidden = false
+      spacer.blink = false
+      spacer.wide = false
+      spacer.url = null
+    }
+  }
 
   function writeChar(ch: string): void {
     // Apply DEC Special Graphics character mapping
@@ -395,12 +565,95 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
 
     const codePoint = ch.codePointAt(0) ?? 0
+
+    // ── VS-16 (U+FE0F): widen previous character to emoji presentation ──
+    if (isVS16(codePoint)) {
+      const prev = getPrevCell()
+      if (prev && !prev.cell.wide) {
+        prev.cell.char += ch
+        const row = grid[curY === 0 && curX === 0 ? 0 : curY]!
+        widenCell(row, prev.col, prev.cell)
+        // Advance cursor past the spacer
+        curX = prev.col + 2
+        if (curX >= cols) curX = cols - 1
+      }
+      return
+    }
+
+    // ── Combining characters: append to previous cell, zero width ──
+    if (isCombining(codePoint) && !isVS16(codePoint)) {
+      const prev = getPrevCell()
+      if (prev) {
+        prev.cell.char += ch
+      }
+      return
+    }
+
+    // ── Emoji modifier (skin tone): append to previous cell, zero width ──
+    if (isEmojiModifier(codePoint)) {
+      const prev = getPrevCell()
+      if (prev) {
+        prev.cell.char += ch
+      }
+      return
+    }
+
+    // ── ZWJ (U+200D): append to previous cell, flag for next char ──
+    if (isZWJ(codePoint)) {
+      const prev = getPrevCell()
+      if (prev) {
+        prev.cell.char += ch
+        afterZWJ = true
+      }
+      return
+    }
+
+    // ── After ZWJ: append this character to the previous cell ──
+    if (afterZWJ) {
+      afterZWJ = false
+      const prev = getPrevCell()
+      if (prev) {
+        prev.cell.char += ch
+        // The ZWJ sequence stays in the same wide cell
+        return
+      }
+    }
+
+    // ── Regional Indicators: pair into flag emoji ──
+    if (isRegionalIndicator(codePoint)) {
+      if (pendingRegionalIndicator !== null) {
+        // Second RI: combine with first to form a flag, render as wide
+        const flag = pendingRegionalIndicator + ch
+        pendingRegionalIndicator = null
+        // Write the combined flag as a wide character
+        writeCharCore(flag, true)
+        return
+      } else {
+        // First RI: store and wait for second
+        pendingRegionalIndicator = ch
+        return
+      }
+    }
+
+    // Flush any pending regional indicator that wasn't paired
+    if (pendingRegionalIndicator !== null) {
+      const ri = pendingRegionalIndicator
+      pendingRegionalIndicator = null
+      writeCharCore(ri, true)
+    }
+
     const wide = isWide(codePoint)
+    writeCharCore(ch, wide)
+  }
+
+  function writeCharCore(ch: string, wide: boolean): void {
     const charWidth = wide ? 2 : 1
 
     // Handle autowrap at end of line
     if (curX + charWidth > cols) {
       if (autoWrap) {
+        // Mark this row as soft-wrapped (auto-wrap caused the line break)
+        softWrapped[curY] = true
         curX = 0
         curY++
         if (curY > scrollBottom) {
@@ -444,27 +697,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     cell.wide = wide
     cell.url = attrs.url
 
-    if (wide && curX + 1 < cols) {
-      let spacer = row[curX + 1]!
-      if (spacer === EMPTY_CELL) {
-        spacer = { ...EMPTY_CELL }
-        row[curX + 1] = spacer
-      }
-      spacer.char = ""
-      spacer.fg = null
-      spacer.bg = null
-      spacer.bold = false
-      spacer.faint = false
-      spacer.italic = false
-      spacer.underline = "none"
-      spacer.underlineColor = null
-      spacer.overline = false
-      spacer.strikethrough = false
-      spacer.inverse = false
-      spacer.hidden = false
-      spacer.blink = false
-      spacer.wide = false
-      spacer.url = null
+    if (wide) {
+      widenCell(row, curX, cell)
     }
 
     curX += charWidth
@@ -663,6 +897,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   }
 
   function handleCSIGt(params: string, _intermediates: string, finalByte: string): void {
+    const parts = params.split(";").map((s) => (s === "" ? 0 : parseInt(s, 10)))
+
     // CSI > sequences
     if (finalByte === "c") {
       // DA2 - Secondary Device Attributes
@@ -678,11 +914,31 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           onResponse("\x1bP>|vterm.js 0.1.0\x1b\\")
         }
       }
+    } else if (finalByte === "u") {
+      // CSI > flags u — Push keyboard mode (Kitty keyboard protocol)
+      kittyKeyboardStack.push(kittyKeyboardFlags)
+      kittyKeyboardFlags = parts[0] ?? 0
+    }
+  }
+
+  function handleCSILt(_params: string, _intermediates: string, finalByte: string): void {
+    // CSI < sequences
+    if (finalByte === "u") {
+      // CSI < u — Pop keyboard mode (Kitty keyboard protocol)
+      kittyKeyboardFlags = kittyKeyboardStack.pop() ?? 0
     }
   }
 
   function handleCSIPrivate(params: string, intermediates: string, finalByte: string): void {
     const parts = params.split(";").map((s) => (s === "" ? 0 : parseInt(s, 10)))
+
+    // CSI ? u — Query keyboard mode (Kitty keyboard protocol)
+    if (finalByte === "u") {
+      if (onResponse) {
+        onResponse(`\x1b[?${kittyKeyboardFlags}u`)
+      }
+      return
+    }
 
     // DECRPM - Mode reporting: CSI ? Pd $ p
     if (intermediates === "$" && finalByte === "p") {
@@ -766,9 +1022,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           if (set && !useAltScreen) {
             useAltScreen = true
             grid = altGrid
+            softWrapped = altSoftWrapped
           } else if (!set && useAltScreen) {
             useAltScreen = false
             grid = mainGrid
+            softWrapped = mainSoftWrapped
           }
           break
         case 66: // DECNKM - Application Keypad
@@ -798,12 +1056,15 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             savedCurY = curY
             useAltScreen = true
             altGrid = makeGrid(cols, rows)
+            altSoftWrapped = new Array(rows).fill(false)
             grid = altGrid
+            softWrapped = altSoftWrapped
             curX = 0
             curY = 0
           } else if (!set && useAltScreen) {
             useAltScreen = false
             grid = mainGrid
+            softWrapped = mainSoftWrapped
             curX = savedCurX
             curY = savedCurY
             clampCursor()
@@ -1191,6 +1452,25 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       case 2: // Set window title
         title = value
         break
+      case 133: {
+        // Semantic prompt markers (FinalTerm / shell integration)
+        // Value format: "X" or "X;params" where X is A/B/C/D
+        const marker = value.charAt(0)
+        switch (marker) {
+          case "A": // Start of prompt
+            semanticZones.push({ type: "prompt", startRow: curY, startCol: curX })
+            break
+          case "B": // End of prompt / start of command
+            semanticZones.push({ type: "command", startRow: curY, startCol: curX })
+            break
+          case "C": // End of command / start of output
+            semanticZones.push({ type: "output", startRow: curY, startCol: curX })
+            break
+          case "D": // End of output (exit code in params, ignored for storage)
+            break
+        }
+        break
+      }
       case 1: // Set icon name (ignore)
         break
       case 8: {
@@ -1243,6 +1523,50 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
   }
 
+  // ── DCS handler ──
+
+  function handleDCS(data: string): void {
+    // Sixel graphics: DCS [Ps;Ps;Ps] q [sixel-data]
+    const match = data.match(/^(\d*(?:;\d*)*)q(.*)$/s)
+    if (match) {
+      hasSixel = true
+      sixelImages.push({
+        data: match[2]!,
+        row: dcsStartRow,
+        col: dcsStartCol,
+      })
+      return
+    }
+
+    // Other DCS sequences are consumed and ignored
+  }
+
+  // ── APC handler ──
+
+  function handleAPC(data: string): void {
+    if (!data.startsWith("G")) return
+
+    hasKittyGraphics = true
+
+    // Parse key=value pairs
+    const semicolonIdx = data.indexOf(";")
+    const kvPart = semicolonIdx >= 0 ? data.substring(1, semicolonIdx) : data.substring(1)
+
+    const params: Record<string, string> = {}
+    for (const pair of kvPart.split(",")) {
+      const eqIdx = pair.indexOf("=")
+      if (eqIdx >= 0) {
+        params[pair.substring(0, eqIdx)] = pair.substring(eqIdx + 1)
+      }
+    }
+
+    // Handle query action
+    if (params.a === "q" && onResponse) {
+      // Respond: OK
+      onResponse(`\x1b_Gi=${params.i ?? "0"};OK\x1b\\`)
+    }
+  }
+
   // ── Soft reset (DECSTR) ──
 
   function softReset(): void {
@@ -1251,6 +1575,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     originMode = false
     autoWrap = true
     curVisible = true
+    kittyKeyboardFlags = 0
+    kittyKeyboardStack = []
     cursorShape = "block"
     cursorBlinking = true
     applicationCursor = false
@@ -1302,15 +1628,27 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     insertMode = false
     reverseVideo = false
     syncOutput = false
+    kittyKeyboardFlags = 0
+    kittyKeyboardStack = []
+    hasKittyGraphics = false
+    hasSixel = false
+    sixelImages = []
     scrollTop = 0
     scrollBottom = rows - 1
     viewportOffset = 0
     charsetG0 = false
     clipboard = ""
     lastChar = ""
+    pendingRegionalIndicator = null
+    afterZWJ = false
     parserState = "ground"
     escBuf = ""
     oscBuf = ""
+    apcBuf = ""
+    semanticZones = []
+    mainSoftWrapped = new Array(rows).fill(false)
+    altSoftWrapped = new Array(rows).fill(false)
+    softWrapped = mainSoftWrapped
   }
 
   // ── Main parser ──
@@ -1336,7 +1674,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             // TAB
             curX = Math.min((Math.floor(curX / 8) + 1) * 8, cols - 1)
           } else if (code === 0x0a || code === 0x0b || code === 0x0c) {
-            // LF, VT, FF — linefeed
+            // LF, VT, FF — linefeed (hard break — clear any soft-wrap flag)
+            softWrapped[curY] = false
             curY++
             if (curY > scrollBottom) {
               curY = scrollBottom
@@ -1369,6 +1708,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           } else if (ch === "P") {
             parserState = "dcs"
             escBuf = ""
+            dcsBuf = ""
+            dcsStartRow = curY
+            dcsStartCol = curX
           } else if (ch === "c") {
             // RIS - Reset to Initial State
             fullReset()
@@ -1435,6 +1777,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           } else if (ch === ")") {
             // Designate G1 character set (ignored, just consume next byte)
             parserState = "escape_charset"
+          } else if (ch === "_") {
+            // APC - Application Program Command
+            parserState = "apc"
+            apcBuf = ""
           } else {
             // Unknown escape — return to ground
             parserState = "ground"
@@ -1478,6 +1824,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
               handleCSIPrivate(paramPart.substring(1), intermediatePart, ch)
             } else if (paramPart.startsWith(">")) {
               handleCSIGt(paramPart.substring(1), intermediatePart, ch)
+            } else if (paramPart.startsWith("<")) {
+              handleCSILt(paramPart.substring(1), intermediatePart, ch)
             } else {
               handleCSI(paramPart, intermediatePart, ch)
             }
@@ -1514,19 +1862,23 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           break
 
         case "dcs":
-          // Consume until ST
+          // Accumulate DCS data until ST (ESC \) or BEL
           if (code === 0x1b) {
             parserState = "dcs_st"
           } else if (code === 0x07) {
-            // Some implementations use BEL to terminate DCS
+            // BEL terminates DCS
+            handleDCS(dcsBuf)
             parserState = "ground"
+          } else {
+            dcsBuf += ch
           }
           break
 
         case "dcs_st":
           // Expecting backslash to complete ST
           if (ch === "\\") {
-            // DCS complete
+            // ST (String Terminator) — end of DCS
+            handleDCS(dcsBuf)
           }
           parserState = "ground"
           break
@@ -1537,38 +1889,172 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             parserState = "dcs_st"
           }
           break
+
+        case "apc":
+          if (code === 0x1b) {
+            parserState = "apc_st"
+          } else if (code === 0x07) {
+            // BEL terminates APC
+            handleAPC(apcBuf)
+            parserState = "ground"
+          } else {
+            apcBuf += ch
+          }
+          break
+
+        case "apc_st":
+          if (ch === "\\") {
+            // ST (String Terminator) — end of APC
+            handleAPC(apcBuf)
+          }
+          parserState = "ground"
+          break
       }
     }
   }
 
   // ── Resize ──
 
-  function resize(newCols: number, newRows: number): void {
-    const newMain = makeGrid(newCols, newRows)
-    const newAlt = makeGrid(newCols, newRows)
+  /**
+   * Reconstruct logical lines from a grid, joining rows that were soft-wrapped.
+   * Returns an array of logical lines, each being an array of ScreenCells (may be longer than cols).
+   */
+  function getLogicalLines(srcGrid: ScreenCell[][], srcSoftWrapped: boolean[], srcRows: number): ScreenCell[][] {
+    const logical: ScreenCell[][] = []
+    let currentLine: ScreenCell[] = []
 
-    copyGrid(mainGrid, newMain, Math.min(cols, newCols), Math.min(rows, newRows))
-    copyGrid(altGrid, newAlt, Math.min(cols, newCols), Math.min(rows, newRows))
+    for (let r = 0; r < srcRows; r++) {
+      const row = srcGrid[r]
+      if (!row) continue
+      // Append this row's cells to the current logical line
+      for (let c = 0; c < row.length; c++) {
+        currentLine.push(row[c]!)
+      }
+      if (srcSoftWrapped[r]) {
+        // This row was soft-wrapped — continue accumulating into same logical line
+        continue
+      }
+      // Hard break (or last row): finalize this logical line
+      logical.push(currentLine)
+      currentLine = []
+    }
+    // If there's a dangling line (shouldn't happen, but be safe)
+    if (currentLine.length > 0) {
+      logical.push(currentLine)
+    }
+    return logical
+  }
+
+  /**
+   * Re-wrap logical lines to a new column width, producing grid rows and soft-wrap flags.
+   */
+  function rewrapLines(logicalLines: ScreenCell[][], newCols: number): { rows: ScreenCell[][]; wrapped: boolean[] } {
+    const outRows: ScreenCell[][] = []
+    const outWrapped: boolean[] = []
+
+    for (const line of logicalLines) {
+      // Trim trailing empty cells from logical line
+      let lineLen = line.length
+      while (lineLen > 0) {
+        const cell = line[lineLen - 1]!
+        if (cell === EMPTY_CELL || (cell.char === "" && !cell.wide)) {
+          lineLen--
+        } else {
+          break
+        }
+      }
+
+      if (lineLen === 0) {
+        // Empty logical line — produce one empty row
+        outRows.push(makeRow(newCols))
+        outWrapped.push(false)
+        continue
+      }
+
+      // Wrap the logical line content into rows of newCols width
+      let pos = 0
+      while (pos < lineLen) {
+        const row = makeRow(newCols)
+        let col = 0
+        while (col < newCols && pos < lineLen) {
+          const cell = line[pos]!
+          if (cell.wide && col + 2 > newCols) {
+            // Wide char doesn't fit — leave rest of row empty, wrap to next
+            break
+          }
+          row[col] = cell === EMPTY_CELL ? EMPTY_CELL : { ...cell }
+          col++
+          pos++
+          // If cell was wide, the next cell in the logical line is the spacer
+          // which we already advanced past via pos++
+        }
+        const moreContent = pos < lineLen
+        outRows.push(row)
+        outWrapped.push(moreContent) // soft-wrapped if there's more content to come
+      }
+    }
+
+    return { rows: outRows, wrapped: outWrapped }
+  }
+
+  /**
+   * Trim trailing empty rows from reflowed result, so they don't push content off the top
+   * when we take the last newRows rows.
+   */
+  function trimTrailingEmptyRows(result: { rows: ScreenCell[][]; wrapped: boolean[] }): void {
+    while (result.rows.length > 1) {
+      const lastRow = result.rows[result.rows.length - 1]!
+      const isEmpty = lastRow.every((cell) => cell === EMPTY_CELL || (cell.char === "" && !cell.wide))
+      if (isEmpty && !result.wrapped[result.rows.length - 2]) {
+        // The row before wasn't soft-wrapped and this row is empty — trim it
+        result.rows.pop()
+        result.wrapped.pop()
+      } else {
+        break
+      }
+    }
+  }
+
+  function resize(newCols: number, newRows: number): void {
+    // Reflow main grid
+    const mainLogical = getLogicalLines(mainGrid, mainSoftWrapped, rows)
+    const mainResult = rewrapLines(mainLogical, newCols)
+    trimTrailingEmptyRows(mainResult)
+
+    // Reflow alt grid (usually not reflowed, but do it for consistency)
+    const altLogical = getLogicalLines(altGrid, altSoftWrapped, rows)
+    const altResult = rewrapLines(altLogical, newCols)
+    trimTrailingEmptyRows(altResult)
+
+    // Build new grids: if reflowed content fits, place at top; if it overflows, take the last newRows
+    const newMain = makeGrid(newCols, newRows)
+    const newMainWrapped: boolean[] = new Array(newRows).fill(false)
+    const mainStartRow = Math.max(0, mainResult.rows.length - newRows)
+    for (let r = 0; r < newRows && mainStartRow + r < mainResult.rows.length; r++) {
+      newMain[r] = mainResult.rows[mainStartRow + r]!
+      newMainWrapped[r] = mainResult.wrapped[mainStartRow + r]!
+    }
+
+    // Build new alt grid
+    const newAlt = makeGrid(newCols, newRows)
+    const newAltWrapped: boolean[] = new Array(newRows).fill(false)
+    const altStartRow = Math.max(0, altResult.rows.length - newRows)
+    for (let r = 0; r < newRows && altStartRow + r < altResult.rows.length; r++) {
+      newAlt[r] = altResult.rows[altStartRow + r]!
+      newAltWrapped[r] = altResult.wrapped[altStartRow + r]!
+    }
 
     mainGrid = newMain
     altGrid = newAlt
+    mainSoftWrapped = newMainWrapped
+    altSoftWrapped = newAltWrapped
     grid = useAltScreen ? altGrid : mainGrid
+    softWrapped = useAltScreen ? altSoftWrapped : mainSoftWrapped
     cols = newCols
     rows = newRows
     scrollTop = 0
     scrollBottom = rows - 1
     clampCursor()
-  }
-
-  function copyGrid(src: ScreenCell[][], dst: ScreenCell[][], copyCols: number, copyRows: number): void {
-    for (let row = 0; row < copyRows; row++) {
-      for (let col = 0; col < copyCols; col++) {
-        const srcCell = src[row]?.[col]
-        if (srcCell) {
-          dst[row]![col] = { ...srcCell }
-        }
-      }
-    }
   }
 
   // ── Accessors ──
@@ -1662,6 +2148,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         return syncOutput
       case "sgrMouse":
         return sgrMouse
+      case "kittyKeyboard":
+        return kittyKeyboardFlags > 0
+      case "kittyGraphics":
+        return hasKittyGraphics
+      case "sixel":
+        return hasSixel
       default:
         return false
     }
@@ -1695,5 +2187,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     scrollViewport: (delta: number) => {
       viewportOffset = Math.max(0, Math.min(scrollback.length, viewportOffset + delta))
     },
+    getSemanticZones: () => semanticZones.map((z) => ({ ...z })),
+    getSixelImages: () => sixelImages.map((img) => ({ ...img })),
   }
 }

@@ -100,40 +100,40 @@ console.log(cell.underlineColor) // { r: 0, g: 150, b: 255 }
 
 ### `createVtermScreen(options)`
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `cols` | `number` | `80` | Terminal width |
-| `rows` | `number` | `24` | Terminal height |
-| `scrollbackLimit` | `number` | `1000` | Max scrollback lines |
-| `onResponse` | `(data: string) => void` | — | Callback for DA1/DA2/DSR responses |
+| Option            | Type                     | Default | Description                        |
+| ----------------- | ------------------------ | ------- | ---------------------------------- |
+| `cols`            | `number`                 | `80`    | Terminal width                     |
+| `rows`            | `number`                 | `24`    | Terminal height                    |
+| `scrollbackLimit` | `number`                 | `1000`  | Max scrollback lines               |
+| `onResponse`      | `(data: string) => void` | —       | Callback for DA1/DA2/DSR responses |
 
 ### Screen methods
 
-| Method | Description |
-|--------|-------------|
-| `process(data: Uint8Array)` | Feed raw terminal data |
-| `getText()` | Get all text (scrollback + screen) |
-| `getTextRange(sr, sc, er, ec)` | Get text in a range |
-| `getLine(row)` | Get cells for a row |
-| `getCell(row, col)` | Get a single cell |
-| `getCursorPosition()` | Get cursor `{ x, y }` |
-| `getCursorVisible()` | Check cursor visibility |
-| `getCursorShape()` | Get cursor shape: `"block"`, `"underline"`, or `"bar"` |
-| `getCursorBlinking()` | Check if cursor is blinking |
-| `getMode(mode)` | Check terminal mode |
-| `getTitle()` | Get window title |
-| `getScrollbackLength()` | Number of scrollback lines |
-| `getViewportOffset()` | Current viewport scroll offset |
-| `scrollViewport(delta)` | Scroll viewport |
-| `resize(cols, rows)` | Resize terminal |
-| `reset()` | Reset to initial state |
+| Method                         | Description                                            |
+| ------------------------------ | ------------------------------------------------------ |
+| `process(data: Uint8Array)`    | Feed raw terminal data                                 |
+| `getText()`                    | Get all text (scrollback + screen)                     |
+| `getTextRange(sr, sc, er, ec)` | Get text in a range                                    |
+| `getLine(row)`                 | Get cells for a row                                    |
+| `getCell(row, col)`            | Get a single cell                                      |
+| `getCursorPosition()`          | Get cursor `{ x, y }`                                  |
+| `getCursorVisible()`           | Check cursor visibility                                |
+| `getCursorShape()`             | Get cursor shape: `"block"`, `"underline"`, or `"bar"` |
+| `getCursorBlinking()`          | Check if cursor is blinking                            |
+| `getMode(mode)`                | Check terminal mode                                    |
+| `getTitle()`                   | Get window title                                       |
+| `getScrollbackLength()`        | Number of scrollback lines                             |
+| `getViewportOffset()`          | Current viewport scroll offset                         |
+| `scrollViewport(delta)`        | Scroll viewport                                        |
+| `resize(cols, rows)`           | Resize terminal                                        |
+| `reset()`                      | Reset to initial state                                 |
 
 ### Cell properties
 
 ```typescript
 interface ScreenCell {
   char: string
-  fg: CellColor | null     // { r, g, b }
+  fg: CellColor | null // { r, g, b }
   bg: CellColor | null
   bold: boolean
   faint: boolean
@@ -146,30 +146,30 @@ interface ScreenCell {
   hidden: boolean
   blink: boolean
   wide: boolean
-  url: string | null        // OSC 8 hyperlink
+  url: string | null // OSC 8 hyperlink
 }
 ```
 
 ## vs vt100.js
 
-| Feature | vt100.js | vterm.js |
-|---------|----------|---------|
-| SGR basics (bold, italic, underline, colors) | Yes | Yes |
-| Underline styles (curly, dotted, dashed) | Yes | Yes |
-| Underline color | No | Yes |
-| Blink, overline | No | Yes |
-| Cursor shapes (DECSCUSR) | No | Yes |
-| OSC 8 hyperlinks | No | Yes |
-| DA1/DA2/DA3 responses | No | Yes |
-| DSR/DECRPM responses | No | Yes |
-| Mouse tracking | No | Yes |
-| Focus tracking | No | Yes |
-| Synchronized output | No | Yes |
-| DEC Special Graphics | No | Yes |
-| REP (repeat character) | No | Yes |
-| DECSTR (soft reset) | No | Yes |
-| DCS sequences | No | Yes |
-| Package size | Smaller | Larger |
+| Feature                                      | vt100.js | vterm.js |
+| -------------------------------------------- | -------- | -------- |
+| SGR basics (bold, italic, underline, colors) | Yes      | Yes      |
+| Underline styles (curly, dotted, dashed)     | Yes      | Yes      |
+| Underline color                              | No       | Yes      |
+| Blink, overline                              | No       | Yes      |
+| Cursor shapes (DECSCUSR)                     | No       | Yes      |
+| OSC 8 hyperlinks                             | No       | Yes      |
+| DA1/DA2/DA3 responses                        | No       | Yes      |
+| DSR/DECRPM responses                         | No       | Yes      |
+| Mouse tracking                               | No       | Yes      |
+| Focus tracking                               | No       | Yes      |
+| Synchronized output                          | No       | Yes      |
+| DEC Special Graphics                         | No       | Yes      |
+| REP (repeat character)                       | No       | Yes      |
+| DECSTR (soft reset)                          | No       | Yes      |
+| DCS sequences                                | No       | Yes      |
+| Package size                                 | Smaller  | Larger   |
 
 **Use vt100.js** when you want fast and simple — it covers ~90% of real-world terminal usage.
 

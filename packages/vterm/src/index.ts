@@ -5,4 +5,6 @@ export {
   type ScreenCell,
   type CellColor,
   type UnderlineStyle,
+  type SemanticZone,
+  type SixelImage,
 } from "./screen.ts"

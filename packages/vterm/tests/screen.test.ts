@@ -1295,3 +1295,445 @@ describe("resize", () => {
     expect(screen.getCursorPosition().y).toBeLessThan(5)
   })
 })
+
+// ═══════════════════════════════════════════════════════
+// Semantic Prompts (OSC 133)
+// ═══════════════════════════════════════════════════════
+
+describe("semantic prompts (OSC 133)", () => {
+  test("OSC 133 semantic prompt markers", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1b]133;A\x07$ \x1b]133;B\x07ls\n\x1b]133;C\x07file1 file2\n\x1b]133;D;0\x07"))
+    const zones = screen.getSemanticZones()
+    expect(zones.length).toBeGreaterThan(0)
+    expect(zones[0].type).toBe("prompt")
+  })
+
+  test("records all zone types", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1b]133;A\x07$ \x1b]133;B\x07ls\n\x1b]133;C\x07output\n\x1b]133;D;0\x07"))
+    const zones = screen.getSemanticZones()
+    expect(zones).toHaveLength(3) // A=prompt, B=command, C=output (D is end, not stored)
+    expect(zones[0].type).toBe("prompt")
+    expect(zones[1].type).toBe("command")
+    expect(zones[2].type).toBe("output")
+  })
+
+  test("records cursor position at marker", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("hello\r\n"))
+    screen.process(enc.encode("\x1b]133;A\x07"))
+    const zones = screen.getSemanticZones()
+    expect(zones).toHaveLength(1)
+    expect(zones[0].startRow).toBe(1)
+    expect(zones[0].startCol).toBe(0)
+  })
+
+  test("zones cleared on reset", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1b]133;A\x07$ \x1b]133;B\x07"))
+    expect(screen.getSemanticZones().length).toBeGreaterThan(0)
+    screen.reset()
+    expect(screen.getSemanticZones()).toHaveLength(0)
+  })
+
+  test("OSC 133 with ST terminator", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1b]133;A\x1b\\prompt\x1b]133;B\x1b\\"))
+    const zones = screen.getSemanticZones()
+    expect(zones).toHaveLength(2)
+    expect(zones[0].type).toBe("prompt")
+    expect(zones[1].type).toBe("command")
+  })
+})
+
+// ═══════════════════════════════════════════════════════
+// Text Reflow on Resize
+// ═══════════════════════════════════════════════════════
+
+describe("text reflow", () => {
+  test("text reflows when terminal widens", () => {
+    const screen = createVtermScreen({ cols: 10, rows: 5 })
+    screen.process(enc.encode("abcdefghij")) // fills row 0 exactly, soft-wraps
+    screen.process(enc.encode("klmno"))
+    screen.resize(20, 5)
+    // "abcdefghijklmno" should be on one line now
+    expect(screen.getCell(0, 14).char).toBe("o")
+  })
+
+  test("text reflows when terminal narrows", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 5 })
+    screen.process(enc.encode("abcdefghijklmno"))
+    screen.resize(10, 5)
+    // Should wrap to two lines
+    expect(screen.getCell(1, 0).char).toBe("k")
+  })
+
+  test("hard line breaks preserved during reflow", () => {
+    const screen = createVtermScreen({ cols: 10, rows: 5 })
+    screen.process(enc.encode("hello\r\nworld"))
+    screen.resize(20, 5)
+    // "hello" and "world" should still be on separate lines
+    expect(screen.getCell(0, 0).char).toBe("h")
+    expect(screen.getCell(1, 0).char).toBe("w")
+  })
+
+  test("multiple soft-wrapped lines unwrap correctly", () => {
+    const screen = createVtermScreen({ cols: 5, rows: 10 })
+    // Write 15 chars — should fill 3 rows via soft-wrap
+    screen.process(enc.encode("abcdefghijklmno"))
+    expect(screen.getCell(0, 0).char).toBe("a")
+    expect(screen.getCell(1, 0).char).toBe("f")
+    expect(screen.getCell(2, 0).char).toBe("k")
+    // Widen to 15 — all should fit on one line
+    screen.resize(15, 10)
+    expect(screen.getCell(0, 0).char).toBe("a")
+    expect(screen.getCell(0, 14).char).toBe("o")
+    expect(screen.getCell(1, 0).char).toBe("")
+  })
+
+  test("mixed hard and soft breaks reflow correctly", () => {
+    const screen = createVtermScreen({ cols: 5, rows: 10 })
+    // "abcde" fills row 0, soft-wraps, "fg" on row 1, then hard break (CR+LF), "hi" on row 2
+    screen.process(enc.encode("abcdefg\r\nhi"))
+    expect(screen.getCell(0, 0).char).toBe("a")
+    expect(screen.getCell(1, 0).char).toBe("f")
+    expect(screen.getCell(2, 0).char).toBe("h")
+    // Widen — soft-wrap should unwrap, hard break stays
+    screen.resize(10, 10)
+    expect(screen.getCell(0, 0).char).toBe("a")
+    expect(screen.getCell(0, 5).char).toBe("f")
+    expect(screen.getCell(0, 6).char).toBe("g")
+    expect(screen.getCell(1, 0).char).toBe("h")
+    expect(screen.getCell(1, 1).char).toBe("i")
+  })
+
+  test("narrowing then widening round-trips", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 5 })
+    screen.process(enc.encode("abcdefghijklmno"))
+    screen.resize(5, 5)
+    // Should be on 3 rows
+    expect(screen.getCell(0, 0).char).toBe("a")
+    expect(screen.getCell(1, 0).char).toBe("f")
+    expect(screen.getCell(2, 0).char).toBe("k")
+    // Widen back
+    screen.resize(20, 5)
+    expect(screen.getCell(0, 0).char).toBe("a")
+    expect(screen.getCell(0, 14).char).toBe("o")
+  })
+})
+
+// ═══════════════════════════════════════════════════════
+// Kitty keyboard protocol
+// ═══════════════════════════════════════════════════════
+
+describe("kitty keyboard protocol", () => {
+  test("CSI > 1 u enables kitty keyboard", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1b[>1u"))
+    expect(screen.getMode("kittyKeyboard")).toBe(true)
+  })
+
+  test("CSI < u disables kitty keyboard", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1b[>1u"))
+    screen.process(enc.encode("\x1b[<u"))
+    expect(screen.getMode("kittyKeyboard")).toBe(false)
+  })
+
+  test("push/pop stack works", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1b[>1u")) // push 1
+    screen.process(enc.encode("\x1b[>3u")) // push 3
+    screen.process(enc.encode("\x1b[<u")) // pop → back to 1
+    expect(screen.getMode("kittyKeyboard")).toBe(true)
+    screen.process(enc.encode("\x1b[<u")) // pop → back to 0
+    expect(screen.getMode("kittyKeyboard")).toBe(false)
+  })
+
+  test("CSI ? u queries keyboard mode", () => {
+    let response = ""
+    const screen = createVtermScreen({
+      cols: 80,
+      rows: 24,
+      onResponse: (d) => {
+        response += d
+      },
+    })
+    screen.process(enc.encode("\x1b[>5u"))
+    screen.process(enc.encode("\x1b[?u"))
+    expect(response).toContain("?5u")
+  })
+
+  test("reset clears kitty keyboard", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1b[>1u"))
+    screen.reset()
+    expect(screen.getMode("kittyKeyboard")).toBe(false)
+  })
+})
+
+describe("kitty graphics protocol", () => {
+  test("accepts kitty graphics APC sequence", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    // Minimal kitty graphics: transmit a 1x1 red pixel
+    screen.process(enc.encode("\x1b_Gf=32,s=1,v=1,a=T;/w==\x1b\\"))
+    expect(screen.getMode("kittyGraphics")).toBe(true)
+  })
+
+  test("responds to kitty graphics query", () => {
+    let response = ""
+    const screen = createVtermScreen({
+      cols: 80,
+      rows: 24,
+      onResponse: (d) => {
+        response += d
+      },
+    })
+    screen.process(enc.encode("\x1b_Gi=1,a=q;\x1b\\"))
+    expect(response).toContain("OK")
+  })
+
+  test("kitty graphics doesn't break parser", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1b_Gf=32,s=1,v=1;AAAA\x1b\\Hello"))
+    expect(screen.getCell(0, 0).char).toBe("H")
+  })
+
+  test("BEL-terminated kitty graphics", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1b_Gf=32,a=T;data\x07"))
+    expect(screen.getMode("kittyGraphics")).toBe(true)
+  })
+
+  test("query response includes image id", () => {
+    let response = ""
+    const screen = createVtermScreen({
+      cols: 80,
+      rows: 24,
+      onResponse: (d) => {
+        response += d
+      },
+    })
+    screen.process(enc.encode("\x1b_Gi=42,a=q;\x1b\\"))
+    expect(response).toBe("\x1b_Gi=42;OK\x1b\\")
+  })
+
+  test("reset clears kitty graphics flag", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1b_Gf=32,a=T;data\x1b\\"))
+    expect(screen.getMode("kittyGraphics")).toBe(true)
+    screen.reset()
+    expect(screen.getMode("kittyGraphics")).toBe(false)
+  })
+
+  test("non-graphics APC is ignored", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1b_Xsome-data\x1b\\"))
+    expect(screen.getMode("kittyGraphics")).toBe(false)
+  })
+})
+
+// ═══════════════════════════════════════════════════════
+// Unicode width handling
+// ═══════════════════════════════════════════════════════
+
+describe("unicode width", () => {
+  test("emoji with VS-16 is wide", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 5 })
+    screen.process(enc.encode("A\u2764\ufe0fB")) // A❤️B — heart with VS-16
+    expect(screen.getCell(0, 1).wide).toBe(true)
+    expect(screen.getCell(0, 3).char).toBe("B") // B at col 3 (A=1, ❤️=2)
+  })
+
+  test("regional indicator flags are wide", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 5 })
+    screen.process(enc.encode("\ud83c\uddfa\ud83c\uddf8X")) // 🇺🇸X
+    expect(screen.getCell(0, 0).wide).toBe(true)
+    expect(screen.getCell(0, 0).char).toBe("\ud83c\uddfa\ud83c\uddf8") // Combined flag
+    expect(screen.getCell(0, 2).char).toBe("X")
+  })
+
+  test("ZWJ emoji sequence occupies 2 cells", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 5 })
+    // 👨‍👩‍👧 = U+1F468 U+200D U+1F469 U+200D U+1F467
+    screen.process(enc.encode("\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67X"))
+    // The ZWJ sequence should be in cell 0 (wide), X at col 2
+    expect(screen.getCell(0, 0).wide).toBe(true)
+    expect(screen.getCell(0, 2).char).toBe("X")
+  })
+
+  test("combining characters are zero-width", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 5 })
+    screen.process(enc.encode("e\u0301X")) // é (e + combining acute) + X
+    expect(screen.getCell(0, 0).char).toBe("e\u0301") // Combined in one cell
+    expect(screen.getCell(0, 1).char).toBe("X") // X at col 1, not 2
+  })
+
+  test("emoji modifier (skin tone) appends to previous cell", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 5 })
+    // 👋🏽 = U+1F44B U+1F3FD (wave + medium skin tone)
+    screen.process(enc.encode("\ud83d\udc4b\ud83c\udffcX"))
+    expect(screen.getCell(0, 0).wide).toBe(true)
+    expect(screen.getCell(0, 0).char).toContain("\ud83d\udc4b") // wave emoji
+    expect(screen.getCell(0, 2).char).toBe("X")
+  })
+
+  test("basic emoji without VS-16 are already wide", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 5 })
+    // 😀 = U+1F600 — in the Misc Symbols/Emoticons range
+    screen.process(enc.encode("\ud83d\ude00X"))
+    expect(screen.getCell(0, 0).wide).toBe(true)
+    expect(screen.getCell(0, 2).char).toBe("X")
+  })
+
+  test("multiple flags in sequence", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 5 })
+    // 🇺🇸🇬🇧 = two flags, each width 2
+    screen.process(enc.encode("\ud83c\uddfa\ud83c\uddf8\ud83c\uddec\ud83c\udde7X"))
+    expect(screen.getCell(0, 0).wide).toBe(true) // US flag
+    expect(screen.getCell(0, 2).wide).toBe(true) // GB flag
+    expect(screen.getCell(0, 4).char).toBe("X")
+  })
+
+  test("CJK characters remain wide", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 5 })
+    screen.process(enc.encode("A\u4e16X")) // A + 世 + X
+    expect(screen.getCell(0, 1).wide).toBe(true)
+    expect(screen.getCell(0, 3).char).toBe("X")
+  })
+
+  test("ZWJ sequence: man + ZWJ + woman + ZWJ + girl", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 5 })
+    // Full family emoji ZWJ sequence
+    const family = "\ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67"
+    screen.process(enc.encode(family + "A"))
+    // The entire ZWJ sequence should be in one cell at col 0
+    const cell = screen.getCell(0, 0)
+    expect(cell.wide).toBe(true)
+    // Next printable character should be at col 2
+    expect(screen.getCell(0, 2).char).toBe("A")
+  })
+
+  test("heart with VS-16 between text", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 5 })
+    screen.process(enc.encode("I\u2764\ufe0fU")) // I❤️U
+    expect(screen.getCell(0, 0).char).toBe("I")
+    expect(screen.getCell(0, 1).wide).toBe(true) // heart widened by VS-16
+    expect(screen.getCell(0, 3).char).toBe("U")
+  })
+
+  test("combining diacritical marks on multiple characters", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 5 })
+    screen.process(enc.encode("n\u0303a\u0301l")) // ñál
+    expect(screen.getCell(0, 0).char).toBe("n\u0303") // n with tilde
+    expect(screen.getCell(0, 1).char).toBe("a\u0301") // a with acute
+    expect(screen.getCell(0, 2).char).toBe("l")
+  })
+
+  test("unpaired regional indicator renders as wide", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 5 })
+    // Single RI followed by non-RI should flush the pending RI
+    screen.process(enc.encode("\ud83c\uddfaX"))
+    // The RI should have been flushed and rendered
+    expect(screen.getCell(0, 0).wide).toBe(true)
+    expect(screen.getCell(0, 2).char).toBe("X")
+  })
+})
+
+// ═══════════════════════════════════════════════════════
+// Sixel graphics
+// ═══════════════════════════════════════════════════════
+
+describe("sixel graphics", () => {
+  test("accepts sixel DCS sequence terminated with ST", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    // Simple sixel: DCS q data ST
+    screen.process(enc.encode("\x1bPq#0;2;0;0;0!10~-!10~\x1b\\"))
+    expect(screen.getMode("sixel")).toBe(true)
+  })
+
+  test("accepts sixel DCS sequence terminated with BEL", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1bPq#0;2;0;0;0!10~\x07"))
+    expect(screen.getMode("sixel")).toBe(true)
+  })
+
+  test("sixel with params", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    // DCS 0;1;0 q data ST
+    screen.process(enc.encode("\x1bP0;1;0q#0;2;100;0;0!10~\x1b\\"))
+    expect(screen.getMode("sixel")).toBe(true)
+  })
+
+  test("sixel doesn't break parser state", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1bPq!10~\x1b\\Hello"))
+    expect(screen.getCell(0, 0).char).toBe("H")
+    expect(screen.getCell(0, 1).char).toBe("e")
+    expect(screen.getCell(0, 4).char).toBe("o")
+  })
+
+  test("sixel mode is false when no sixel received", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("Hello"))
+    expect(screen.getMode("sixel")).toBe(false)
+  })
+
+  test("getSixelImages returns stored sixel data", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1bPq#0;2;0;0;0!10~\x1b\\"))
+    const images = screen.getSixelImages()
+    expect(images).toHaveLength(1)
+    expect(images[0]!.data).toBe("#0;2;0;0;0!10~")
+    expect(images[0]!.row).toBe(0)
+    expect(images[0]!.col).toBe(0)
+  })
+
+  test("getSixelImages records cursor position at DCS start", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    // Move cursor to row 5, col 10, then send sixel
+    screen.process(enc.encode("\x1b[6;11H\x1bPq!10~\x1b\\"))
+    const images = screen.getSixelImages()
+    expect(images).toHaveLength(1)
+    expect(images[0]!.row).toBe(5)
+    expect(images[0]!.col).toBe(10)
+  })
+
+  test("multiple sixel images are tracked", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1bPqAAA\x1b\\\x1bPqBBB\x1b\\"))
+    const images = screen.getSixelImages()
+    expect(images).toHaveLength(2)
+    expect(images[0]!.data).toBe("AAA")
+    expect(images[1]!.data).toBe("BBB")
+  })
+
+  test("sixel state resets on full reset", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1bPq!10~\x1b\\"))
+    expect(screen.getMode("sixel")).toBe(true)
+    expect(screen.getSixelImages()).toHaveLength(1)
+    screen.reset()
+    expect(screen.getMode("sixel")).toBe(false)
+    expect(screen.getSixelImages()).toHaveLength(0)
+  })
+
+  test("non-sixel DCS doesn't set sixel mode", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    // Some other DCS sequence (not ending with q introducer)
+    screen.process(enc.encode("\x1bP+p544F505F434F4C4F5253\x1b\\"))
+    expect(screen.getMode("sixel")).toBe(false)
+    expect(screen.getSixelImages()).toHaveLength(0)
+  })
+
+  test("sixel with empty data", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    // DCS q ST (no sixel data)
+    screen.process(enc.encode("\x1bPq\x1b\\"))
+    expect(screen.getMode("sixel")).toBe(true)
+    const images = screen.getSixelImages()
+    expect(images).toHaveLength(1)
+    expect(images[0]!.data).toBe("")
+  })
+})
