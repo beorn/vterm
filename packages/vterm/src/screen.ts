@@ -638,6 +638,16 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           }
         }
         break
+      case "h": // SM - Set Mode (non-private)
+        for (const code of parts) {
+          if (code === 4) insertMode = true // IRM - Insert/Replace Mode
+        }
+        break
+      case "l": // RM - Reset Mode (non-private)
+        for (const code of parts) {
+          if (code === 4) insertMode = false
+        }
+        break
       case "s": // SCP - Save Cursor Position
         savedCurX = curX
         savedCurY = curY
