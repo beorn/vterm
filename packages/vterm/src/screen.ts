@@ -1600,9 +1600,15 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         break
       }
       case 1337: {
-        // iTerm2 proprietary sequences (inline images, etc.)
-        // Headless design: we don't render images, but we don't corrupt the
-        // surrounding text stream either — the sequence is fully consumed.
+        // iTerm2 proprietary sequences
+        if (value === "ReportCellSize" && onResponse) {
+          // Report default 8x16 pixel cell size (standard monospace ratio)
+          onResponse("\x1b]1337;ReportCellSize=16;8\x1b\\")
+        } else if (value === "RequestCapabilities" && onResponse) {
+          // Report empty capabilities (protocol supported, no iTerm2-specific features)
+          onResponse("\x1b]1337;Capabilities=\x1b\\")
+        }
+        // Inline images (File=...) are silently consumed — no pixel framebuffer
         break
       }
     }
