@@ -611,6 +611,15 @@ export function createScreen(opts: ScreenOptions): Screen {
         case 49: // Default background
           attrs.bg = null
           break
+        // Skip extended color sequences (not supported, but must consume params)
+        case 38:
+        case 48:
+          if (i + 1 < params.length && params[i + 1] === 2) {
+            i += 4 // skip 38;2;R;G;B or 48;2;R;G;B
+          } else if (i + 1 < params.length && params[i + 1] === 5) {
+            i += 2 // skip 38;5;N or 48;5;N
+          }
+          break
       }
       i++
     }
