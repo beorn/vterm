@@ -1,6 +1,6 @@
 {
   "name": "vterm.js",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Modern terminal emulator — full VT/ECMA-48/xterm standards coverage. Pure TypeScript, zero dependencies.",
   "keywords": [
     "ansi",

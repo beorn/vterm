@@ -1,6 +1,6 @@
 {
   "name": "vt100.js",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Pure TypeScript VT100 terminal emulator. Zero dependencies, headless, fast.",
   "keywords": [
     "ansi",
