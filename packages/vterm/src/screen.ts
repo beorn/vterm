@@ -724,6 +724,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
   }
 
+  function scrollViewport(delta: number): void {
+    viewportOffset = Math.max(0, Math.min(scrollback.length, viewportOffset + delta))
+  }
+
   // ── Character writing ──
 
   /** Find the previous non-spacer cell (the cell before curX, skipping wide-char spacers) */
@@ -2479,6 +2483,19 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         // rxvt-unicode version query shape: OSC 702 ; name ; resource ; major ; minor ST.
         if (onResponse) onResponse("\x1b]702;vterm.js;vterm;0;2\x1b\\")
         break
+      case 720: {
+        // rxvt-unicode scroll view up. This is a viewport operation over
+        // existing scrollback, not a screen-buffer mutation.
+        const n = parseInt(value, 10)
+        scrollViewport(!isNaN(n) && n > 0 ? n : 1)
+        break
+      }
+      case 721: {
+        // rxvt-unicode scroll view down toward the live region.
+        const n = parseInt(value, 10)
+        scrollViewport(-(!isNaN(n) && n > 0 ? n : 1))
+        break
+      }
       case 776:
         // rxvt-unicode cell metrics: cell-width ; cell-height ; font-ascent.
         if (onResponse) onResponse(`\x1b]776;${CELL_W_PX};${CELL_H_PX};${FONT_ASCENT_PX}\x1b\\`)
@@ -3327,9 +3344,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     getNotifications: () => [...notifications],
     getScrollbackLength: () => scrollback.length,
     getViewportOffset: () => viewportOffset,
-    scrollViewport: (delta: number) => {
-      viewportOffset = Math.max(0, Math.min(scrollback.length, viewportOffset + delta))
-    },
+    scrollViewport,
     getSemanticZones: () => semanticZones.map((z) => ({ ...z })),
     getSixelImages: () => sixelImages.map((img) => ({ ...img })),
   }

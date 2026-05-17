@@ -1161,6 +1161,15 @@ describe("scrollback", () => {
     screen.scrollViewport(-1)
     expect(screen.getViewportOffset()).toBe(0)
   })
+
+  test("OSC 720 scrolls viewport up into scrollback", () => {
+    const screen = createVtermScreen({ cols: 10, rows: 3, scrollbackLimit: 100 })
+    screen.process(enc.encode("line1\r\nline2\r\nline3\r\nline4"))
+
+    screen.process(enc.encode("\x1b]720\x07"))
+
+    expect(screen.getViewportOffset()).toBe(1)
+  })
 })
 
 // ═══════════════════════════════════════════════════════
