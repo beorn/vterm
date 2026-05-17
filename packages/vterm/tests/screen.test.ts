@@ -2024,6 +2024,49 @@ describe("OSC 66 — text sizing", () => {
 })
 
 // ═══════════════════════════════════════════════════════
+// Mintty/rxvt-unicode query OSCs
+// ═══════════════════════════════════════════════════════
+
+describe("OSC 7770/7777 — mintty font size queries", () => {
+  test("OSC 7770 query responds with restorable font size", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    screen.process(enc.encode("\x1b]7770;?\x07"))
+    expect(responses[0]).toBe("\x1b]7770;12\x1b\\")
+  })
+
+  test("OSC 7777 query responds with restorable font/window zoom size", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    screen.process(enc.encode("\x1b]7777;?\x07"))
+    expect(responses[0]).toBe("\x1b]7777;12\x1b\\")
+  })
+})
+
+describe("OSC 701/702/776 — rxvt-unicode queries", () => {
+  test("OSC 701 locale set/query round-trips", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    screen.process(enc.encode("\x1b]701;en_GB.UTF-8\x07\x1b]701;?\x07"))
+    expect(responses[0]).toBe("\x1b]701;en_GB.UTF-8\x1b\\")
+  })
+
+  test("OSC 702 reports a version tuple", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    screen.process(enc.encode("\x1b]702\x07"))
+    expect(responses[0]).toBe("\x1b]702;vterm.js;vterm;0;2\x1b\\")
+  })
+
+  test("OSC 776 reports cell metrics", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    screen.process(enc.encode("\x1b]776\x07"))
+    expect(responses[0]).toBe("\x1b]776;8;17;14\x1b\\")
+  })
+})
+
+// ═══════════════════════════════════════════════════════
 // OSC 5522 — Advanced Clipboard (Kitty protocol)
 // ═══════════════════════════════════════════════════════
 

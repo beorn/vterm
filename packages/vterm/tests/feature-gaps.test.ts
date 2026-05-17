@@ -91,6 +91,23 @@ describe("OSC 10/11/12 — default fg/bg/cursor", () => {
   })
 })
 
+describe("OSC 13/14 — pointer colors", () => {
+  test("pointer fg/bg query returns default colors", () => {
+    const { responses, feed } = makeScreen()
+    feed("\x1b]13;?\x07\x1b]14;?\x07")
+    expect(responses[0]).toBe("\x1b]13;rgb:ffff/ffff/ffff\x1b\\")
+    expect(responses[1]).toBe("\x1b]14;rgb:0000/0000/0000\x1b\\")
+  })
+
+  test("OSC 113/114 reset pointer colors", () => {
+    const { responses, feed } = makeScreen()
+    feed("\x1b]13;rgb:12/34/56\x07\x1b]14;rgb:65/43/21\x07")
+    feed("\x1b]113\x07\x1b]114\x07\x1b]13;?\x07\x1b]14;?\x07")
+    expect(responses[0]).toBe("\x1b]13;rgb:ffff/ffff/ffff\x1b\\")
+    expect(responses[1]).toBe("\x1b]14;rgb:0000/0000/0000\x1b\\")
+  })
+})
+
 describe("OSC 17/19 — highlight colors", () => {
   test("set/query highlight bg", () => {
     const { responses, feed } = makeScreen()
@@ -102,6 +119,25 @@ describe("OSC 17/19 — highlight colors", () => {
     const { responses, feed } = makeScreen()
     feed("\x1b]17;rgb:a0/b0/c0\x07\x1b]117\x07\x1b]17;?\x07")
     expect(responses[0]).toBe("\x1b]17;rgb:ffff/ffff/ffff\x1b\\")
+  })
+})
+
+describe("OSC 30001/30101 — Kitty color stack", () => {
+  test("push/pop restores dynamic colors and palette entries", () => {
+    const { responses, feed } = makeScreen()
+    feed("\x1b]10;rgb:10/20/30\x07\x1b]4;1;rgb:40/50/60\x07")
+    feed("\x1b]30001\x07")
+    feed("\x1b]10;rgb:aa/bb/cc\x07\x1b]4;1;rgb:dd/ee/ff\x07")
+    feed("\x1b]30101\x07")
+    feed("\x1b]10;?\x07\x1b]4;1;?\x07")
+    expect(responses[0]).toBe("\x1b]10;rgb:1010/2020/3030\x1b\\")
+    expect(responses[1]).toBe("\x1b]4;1;rgb:4040/5050/6060\x1b\\")
+  })
+
+  test("pop with an empty stack is a no-op", () => {
+    const { responses, feed } = makeScreen()
+    feed("\x1b]10;rgb:10/20/30\x07\x1b]30101\x07\x1b]10;?\x07")
+    expect(responses[0]).toBe("\x1b]10;rgb:1010/2020/3030\x1b\\")
   })
 })
 

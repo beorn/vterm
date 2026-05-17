@@ -464,8 +464,53 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let defaultBgColor: CellColor | null = null // OSC 11 / 111
   let cursorColor: CellColor | null = null // OSC 12 / 112
   const specialColors: Map<number, CellColor> = new Map() // OSC 5 / 105 (0=bold, 1=ul, 2=blink, 3=reverse, 4=italic)
+  let pointerFgColor: CellColor | null = null // OSC 13 / 113
+  let pointerBgColor: CellColor | null = null // OSC 14 / 114
   let highlightBgColor: CellColor | null = null // OSC 17 / 117
   let highlightFgColor: CellColor | null = null // OSC 19 / 119
+  type ColorStateSnapshot = {
+    palette256: CellColor[]
+    defaultFgColor: CellColor | null
+    defaultBgColor: CellColor | null
+    cursorColor: CellColor | null
+    specialColors: [number, CellColor][]
+    pointerFgColor: CellColor | null
+    pointerBgColor: CellColor | null
+    highlightBgColor: CellColor | null
+    highlightFgColor: CellColor | null
+  }
+  const colorStack: ColorStateSnapshot[] = []
+
+  function cloneColor(c: CellColor | null): CellColor | null {
+    return c ? { ...c } : null
+  }
+
+  function snapshotColorState(): ColorStateSnapshot {
+    return {
+      palette256: palette256.map((c) => ({ ...c })),
+      defaultFgColor: cloneColor(defaultFgColor),
+      defaultBgColor: cloneColor(defaultBgColor),
+      cursorColor: cloneColor(cursorColor),
+      specialColors: [...specialColors].map(([idx, color]) => [idx, { ...color }]),
+      pointerFgColor: cloneColor(pointerFgColor),
+      pointerBgColor: cloneColor(pointerBgColor),
+      highlightBgColor: cloneColor(highlightBgColor),
+      highlightFgColor: cloneColor(highlightFgColor),
+    }
+  }
+
+  function restoreColorState(snapshot: ColorStateSnapshot): void {
+    palette256 = snapshot.palette256.map((c) => ({ ...c }))
+    defaultFgColor = cloneColor(snapshot.defaultFgColor)
+    defaultBgColor = cloneColor(snapshot.defaultBgColor)
+    cursorColor = cloneColor(snapshot.cursorColor)
+    specialColors.clear()
+    for (const [idx, color] of snapshot.specialColors) specialColors.set(idx, { ...color })
+    pointerFgColor = cloneColor(snapshot.pointerFgColor)
+    pointerBgColor = cloneColor(snapshot.pointerBgColor)
+    highlightBgColor = cloneColor(snapshot.highlightBgColor)
+    highlightFgColor = cloneColor(snapshot.highlightFgColor)
+  }
 
   // Tab stops: set of 0-based column indices. Defaults = every 8 cols.
   let tabStops: Set<number> = defaultTabStops(cols)
@@ -496,6 +541,16 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   // Text scale (OSC 66)
   let textScale = 1
+
+  // UI metric query state (OSC 7770/7777/776)
+  const CELL_W_PX = 8
+  const CELL_H_PX = 17
+  const FONT_ASCENT_PX = 14
+  let fontSize = 12
+  let fontWindowSize = 12
+
+  // Locale query state (OSC 701)
+  let locale = "en_US.UTF-8"
 
   // Advanced clipboard (OSC 5522 — Kitty clipboard protocol)
   let advancedClipboard = ""
@@ -2171,6 +2226,28 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           if (c) cursorColor = c
         }
         break
+      case 13: // OSC 13 — pointer foreground color: set or query.
+        if (value === "?") {
+          if (onResponse) {
+            const c = pointerFgColor ?? defaultFgColor ?? { r: 0xff, g: 0xff, b: 0xff }
+            onResponse(`\x1b]13;${formatColorResponse(c)}\x1b\\`)
+          }
+        } else {
+          const c = parseColorSpec(value)
+          if (c) pointerFgColor = c
+        }
+        break
+      case 14: // OSC 14 — pointer background color: set or query.
+        if (value === "?") {
+          if (onResponse) {
+            const c = pointerBgColor ?? defaultBgColor ?? { r: 0, g: 0, b: 0 }
+            onResponse(`\x1b]14;${formatColorResponse(c)}\x1b\\`)
+          }
+        } else {
+          const c = parseColorSpec(value)
+          if (c) pointerBgColor = c
+        }
+        break
       case 17: // OSC 17 — highlight (selection) bg: set or query.
         if (value === "?") {
           if (onResponse) {
@@ -2311,6 +2388,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       case 112: // OSC 112 — reset cursor color
         cursorColor = null
         break
+      case 113: // OSC 113 — reset pointer foreground color
+        pointerFgColor = null
+        break
+      case 114: // OSC 114 — reset pointer background color
+        pointerBgColor = null
+        break
       case 117: // OSC 117 — reset highlight bg
         highlightBgColor = null
         break
@@ -2382,6 +2465,56 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             }
           }
         }
+        break
+      }
+      case 701:
+        // rxvt-unicode locale query/set. Query returns the current locale.
+        if (value === "?") {
+          if (onResponse) onResponse(`\x1b]701;${locale}\x1b\\`)
+        } else if (value !== "") {
+          locale = value
+        }
+        break
+      case 702:
+        // rxvt-unicode version query shape: OSC 702 ; name ; resource ; major ; minor ST.
+        if (onResponse) onResponse("\x1b]702;vterm.js;vterm;0;2\x1b\\")
+        break
+      case 776:
+        // rxvt-unicode cell metrics: cell-width ; cell-height ; font-ascent.
+        if (onResponse) onResponse(`\x1b]776;${CELL_W_PX};${CELL_H_PX};${FONT_ASCENT_PX}\x1b\\`)
+        break
+      case 7770: {
+        // mintty font size query/set. Query returns a restorable set sequence.
+        if (value === "?") {
+          if (onResponse) onResponse(`\x1b]7770;${fontSize}\x1b\\`)
+        } else if (value === "") {
+          fontSize = 12
+        } else {
+          const n = parseInt(value, 10)
+          if (!isNaN(n) && n > 0) fontSize = n
+        }
+        break
+      }
+      case 7777: {
+        // mintty font + window size query/set. Kept separate from OSC 7770.
+        if (value === "?") {
+          if (onResponse) onResponse(`\x1b]7777;${fontWindowSize}\x1b\\`)
+        } else if (value === "") {
+          fontWindowSize = 12
+        } else {
+          const n = parseInt(value, 10)
+          if (!isNaN(n) && n > 0) fontWindowSize = n
+        }
+        break
+      }
+      case 30001:
+        // Kitty color stack push.
+        colorStack.push(snapshotColorState())
+        break
+      case 30101: {
+        // Kitty color stack pop; empty stack is a no-op.
+        const snapshot = colorStack.pop()
+        if (snapshot) restoreColorState(snapshot)
         break
       }
       case 5522: {
@@ -2572,6 +2705,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     altScrollMode = false
     utf8MouseMode = false
     textScale = 1
+    fontSize = 12
+    fontWindowSize = 12
+    locale = "en_US.UTF-8"
     advancedClipboard = ""
     viewportOffset = 0
     charsetG0 = false
@@ -2583,8 +2719,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     defaultBgColor = null
     cursorColor = null
     specialColors.clear()
+    pointerFgColor = null
+    pointerBgColor = null
     highlightBgColor = null
     highlightFgColor = null
+    colorStack.length = 0
     tabStops = defaultTabStops(cols)
     lastChar = ""
     pendingRegionalIndicator = null
