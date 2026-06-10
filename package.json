@@ -13,9 +13,12 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "fmt": "oxfmt --write .",
+    "fmt:check": "oxfmt --check ."
   },
   "devDependencies": {
+    "oxfmt": "0.38.0",
     "tsdown": "^0.21.7",
     "vitest": "^4.1.1"
   },

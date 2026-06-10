@@ -1,0 +1,8 @@
+{
+  "modules": ["release", "verify", "format-check", "oxfmt"],
+  "vars": { "testCommand": "bun run test" },
+  "overrides": {
+    "release": "multi-package publish loop (vt100, vt220, vterm) with skip-if-published guard + per-package tsdown build — generic single-publish template doesn't apply",
+    "verify": "per-package tsdown pack+install+import verification loop over packages/*"
+  }
+}
