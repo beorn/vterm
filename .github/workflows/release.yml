@@ -17,6 +17,9 @@ jobs:
         with:
           bun-version: latest
       - run: bun install
+      # Pre-publish gate: suite must be green before anything is built or
+      # published. If this fails, no tarballs reach npm.
+      - run: bun run test
       - uses: pnpm/action-setup@v4
         with:
           version: 9
