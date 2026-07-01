@@ -127,6 +127,8 @@ console.log(cell.underlineColor) // { r: 0, g: 150, b: 255 }
 | `scrollViewport(delta)`        | Scroll viewport                                        |
 | `resize(cols, rows)`           | Resize terminal                                        |
 | `reset()`                      | Reset to initial state                                 |
+| `snapshot()`                   | Capture serializable T0-T3 terminal state              |
+| `restore(snapshot)`            | Restore a snapshot captured from `snapshot()`          |
 
 ### Cell properties
 

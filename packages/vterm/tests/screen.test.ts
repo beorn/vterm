@@ -1,5 +1,5 @@
 import { describe, test, expect } from "vitest"
-import { createVtermScreen } from "../src/index.ts"
+import { createVtermScreen, type VtermScreenSnapshot } from "../src/index.ts"
 
 const enc = new TextEncoder()
 
@@ -2115,5 +2115,175 @@ describe("OSC 5522 — advanced clipboard", () => {
     screen.reset()
     screen.process(enc.encode("\x1b]5522;?\x1b\\"))
     expect(responses[0]).toBe("\x1b]5522;\x1b\\")
+  })
+})
+
+// ═══════════════════════════════════════════════════════
+// Snapshot / restore
+// ═══════════════════════════════════════════════════════
+
+function expectRestoredSnapshot(snapshot: VtermScreenSnapshot): void {
+  const restored = createVtermScreen()
+  restored.restore(snapshot)
+  expect(restored.snapshot()).toEqual(snapshot)
+}
+
+describe("snapshot / restore", () => {
+  test("round-trips T0-T3 screen state", () => {
+    const screen = createVtermScreen({ cols: 8, rows: 3, scrollbackLimit: 20 })
+    screen.process(enc.encode("\x1b]0;session-title\x07"))
+    screen.process(enc.encode("\x1b]7;file://localhost/tmp/project\x07"))
+    screen.process(enc.encode("\x1b[38;2;1;2;3mone\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix"))
+    screen.process(enc.encode("\x1b[?25l\x1b[6 q\x1b[?6h\x1b[?7l\x1b[4h\x1b[?69h\x1b[2;6s"))
+    screen.process(enc.encode("\x1b[?1049hALT\x1b[2;3H"))
+
+    const snapshot = screen.snapshot()
+
+    expect(snapshot.version).toBe(1)
+    expect(snapshot.title).toBe("session-title")
+    expect(snapshot.cwd).toBe("file://localhost/tmp/project")
+    expect(snapshot.cursor.shape).toBe("bar")
+    expect(snapshot.cursor.visible).toBe(false)
+    expect(snapshot.modes.origin).toBe(true)
+    expect(snapshot.modes.autoWrap).toBe(false)
+    expect(snapshot.modes.insert).toBe(true)
+    expect(snapshot.margins.leftRight).toBe(true)
+    expect(snapshot.activeBuffer).toBe("alt")
+    expect(snapshot.scrollback.length).toBeGreaterThan(0)
+
+    expectRestoredSnapshot(snapshot)
+
+    screen.process(enc.encode("mutate-source-after-snapshot"))
+    expectRestoredSnapshot(snapshot)
+  })
+
+  test("has a stable top-level schema", () => {
+    const snapshot = createVtermScreen({ cols: 2, rows: 1 }).snapshot()
+    expect(Object.keys(snapshot).sort()).toEqual([
+      "activeBuffer",
+      "alt",
+      "attrs",
+      "clipboard",
+      "colors",
+      "cols",
+      "cursor",
+      "cwd",
+      "main",
+      "margins",
+      "modes",
+      "notifications",
+      "parser",
+      "rows",
+      "savedState",
+      "scrollback",
+      "scrollbackLimit",
+      "tabStops",
+      "title",
+      "unicode",
+      "version",
+      "viewportOffset",
+    ])
+    expect(snapshot.parser).toEqual({
+      state: "ground",
+      esc: "",
+      osc: "",
+      dcs: "",
+      dcsStart: { row: 0, col: 0 },
+      apc: "",
+      utf8PendingBytes: [],
+    })
+  })
+
+  test("rejects unsupported snapshot versions", () => {
+    const screen = createVtermScreen()
+    const snapshot = screen.snapshot()
+
+    expect(() => {
+      screen.restore({ ...snapshot, version: 999 } as VtermScreenSnapshot)
+    }).toThrow(/Unsupported vterm snapshot version/)
+  })
+
+  test("rejects malformed snapshots without mutating the current screen", () => {
+    const target = screenWith("target", { cols: 6, rows: 2 })
+    const before = target.snapshot()
+    const donor = screenWith("donor", { cols: 8, rows: 3 }).snapshot()
+    const malformed = { ...donor, colors: undefined } as unknown as VtermScreenSnapshot
+
+    expect(() => {
+      target.restore(malformed)
+    }).toThrow(/Invalid vterm snapshot colors/)
+    expect(target.snapshot()).toEqual(before)
+  })
+
+  test("resumes CSI, OSC, DCS, and UTF-8 parser cut points", () => {
+    const csi = createVtermScreen({ cols: 4, rows: 1 })
+    csi.process(enc.encode("\x1b[31"))
+    const csiRestored = createVtermScreen({ cols: 4, rows: 1 })
+    csiRestored.restore(csi.snapshot())
+    csiRestored.process(enc.encode("mR"))
+    const csiFresh = screenWith("\x1b[31mR", { cols: 4, rows: 1 })
+    expect(csiRestored.snapshot()).toEqual(csiFresh.snapshot())
+
+    const osc = createVtermScreen()
+    osc.process(enc.encode("\x1b]0;half"))
+    const oscRestored = createVtermScreen()
+    oscRestored.restore(osc.snapshot())
+    oscRestored.process(enc.encode(" title\x07"))
+    expect(oscRestored.getTitle()).toBe("half title")
+
+    const responses: string[] = []
+    const dcs = createVtermScreen()
+    dcs.process(enc.encode("\x1bP+q54"))
+    const dcsRestored = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    dcsRestored.restore(dcs.snapshot())
+    dcsRestored.process(enc.encode("4e\x1b\\"))
+    expect(responses).toEqual(["\x1bP1+r544e=767465726d\x1b\\"])
+
+    const utf8 = createVtermScreen({ cols: 2, rows: 1 })
+    utf8.process(new Uint8Array([0xe2]))
+    const utf8Restored = createVtermScreen({ cols: 2, rows: 1 })
+    utf8Restored.restore(utf8.snapshot())
+    utf8Restored.process(new Uint8Array([0x82, 0xac]))
+    expect(utf8Restored.getCell(0, 0).char).toBe("€")
+  })
+
+  test("restored snapshots resize deterministically", () => {
+    const source = createVtermScreen({ cols: 5, rows: 5 })
+    source.process(enc.encode("abcdefghijklmno"))
+    source.resize(10, 5)
+
+    const restored = createVtermScreen()
+    restored.restore(source.snapshot())
+    restored.resize(5, 5)
+
+    const fresh = createVtermScreen({ cols: 5, rows: 5 })
+    fresh.process(enc.encode("abcdefghijklmno"))
+    fresh.resize(10, 5)
+    fresh.resize(5, 5)
+
+    expect(restored.snapshot()).toEqual(fresh.snapshot())
+  })
+
+  test("split feed through snapshot matches uninterrupted feed", () => {
+    const chunks = [
+      enc.encode("alpha\r\n"),
+      enc.encode("\x1b[?25l\x1b[38;5;196m"),
+      new Uint8Array([0xf0, 0x9f]),
+      new Uint8Array([0x8c, 0x8a]),
+      enc.encode("\x1b[?1049hALT\x1b[?1049lomega"),
+    ]
+    const split = createVtermScreen({ cols: 10, rows: 4, scrollbackLimit: 20 })
+    const uninterrupted = createVtermScreen({ cols: 10, rows: 4, scrollbackLimit: 20 })
+
+    for (const chunk of chunks) uninterrupted.process(chunk)
+    split.process(chunks[0]!)
+    split.process(chunks[1]!)
+    split.process(chunks[2]!)
+
+    const restored = createVtermScreen()
+    restored.restore(split.snapshot())
+    for (const chunk of chunks.slice(3)) restored.process(chunk)
+
+    expect(restored.snapshot()).toEqual(uninterrupted.snapshot())
   })
 })

@@ -29,7 +29,7 @@ VT220 emulator. Extends VT100 with 8 standard colors, insert/delete operations, 
 
 Full-featured modern emulator targeting 100% of the [terminfo.dev](https://terminfo.dev) feature matrix.
 
-- **Exports**: `createVtermScreen`, `VtermScreen`, `VtermScreenOptions`, `ScreenCell`, `CellColor`, `UnderlineStyle`, `SemanticZone`, `SixelImage`
+- **Exports**: `createVtermScreen`, `VtermScreen`, `VtermScreenOptions`, `VtermScreenSnapshot`, `VtermScreenAttrsSnapshot`, `VtermScreenColorStateSnapshot`, `VtermScreenParserState`, `VtermScreenBufferSnapshot`, `ScreenCell`, `CellColor`, `UnderlineStyle`, `SemanticZone`, `SixelImage`
 - **Capabilities**: Everything in vt220.js plus: underline styles (curly/dotted/dashed), overline, blink, underline color, cursor shape (DECSCUSR), mouse tracking, focus tracking, synchronized output, Kitty keyboard protocol, scrollback buffer, wide characters (CJK, emoji ZWJ), OSC hyperlinks/clipboard/colors, DCS/APC sequences, DA1/DA2/DA3, DECRPM, character sets, soft reset
 - **Source**: Single file — `src/screen.ts`
 

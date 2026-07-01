@@ -81,6 +81,135 @@ export interface SixelImage {
   col: number // cursor col when sixel started
 }
 
+export interface ScreenAttrsSnapshot {
+  fg: CellColor | null
+  bg: CellColor | null
+  bold: boolean
+  faint: boolean
+  italic: boolean
+  underline: UnderlineStyle
+  underlineColor: CellColor | null
+  overline: boolean
+  strikethrough: boolean
+  inverse: boolean
+  hidden: boolean
+  blink: boolean
+  url: string | null
+}
+
+export interface ScreenColorStateSnapshot {
+  palette256: CellColor[]
+  defaultFgColor: CellColor | null
+  defaultBgColor: CellColor | null
+  cursorColor: CellColor | null
+  specialColors: [number, CellColor][]
+  pointerFgColor: CellColor | null
+  pointerBgColor: CellColor | null
+  highlightBgColor: CellColor | null
+  highlightFgColor: CellColor | null
+}
+
+export type ScreenParserState =
+  | "ground"
+  | "escape"
+  | "escape_charset"
+  | "escape_hash"
+  | "csi"
+  | "osc"
+  | "dcs"
+  | "dcs_passthrough"
+  | "osc_st"
+  | "dcs_st"
+  | "apc"
+  | "apc_st"
+
+export interface ScreenBufferSnapshot {
+  grid: ScreenCell[][]
+  softWrapped: boolean[]
+}
+
+export interface ScreenSnapshot {
+  version: 1
+  cols: number
+  rows: number
+  scrollbackLimit: number
+  activeBuffer: "main" | "alt"
+  main: ScreenBufferSnapshot
+  alt: ScreenBufferSnapshot
+  scrollback: ScreenCell[][]
+  cursor: {
+    x: number
+    y: number
+    visible: boolean
+    shape: "block" | "underline" | "bar"
+    blinking: boolean
+    savedX: number
+    savedY: number
+  }
+  savedState: {
+    x: number
+    y: number
+    attrs: ScreenAttrsSnapshot
+    originMode: boolean
+    autoWrap: boolean
+    charsetG0: boolean
+  }
+  attrs: ScreenAttrsSnapshot
+  modes: {
+    bracketedPaste: boolean
+    applicationCursor: boolean
+    applicationKeypad: boolean
+    autoWrap: boolean
+    mouseTracking: boolean
+    mouseTrackingMode: number
+    sgrMouse: boolean
+    focusTracking: boolean
+    origin: boolean
+    insert: boolean
+    reverseVideo: boolean
+    syncOutput: boolean
+    kittyKeyboardFlags: number
+    kittyKeyboardStack: number[]
+    kittyGraphics: boolean
+    colorSchemeReporting: boolean
+    decColumn: boolean
+    altScroll: boolean
+    utf8Mouse: boolean
+  }
+  margins: {
+    scrollTop: number
+    scrollBottom: number
+    leftRight: boolean
+    left: number
+    right: number
+  }
+  colors: {
+    current: ScreenColorStateSnapshot
+    stack: ScreenColorStateSnapshot[]
+  }
+  tabStops: number[]
+  title: string
+  clipboard: string
+  cwd: string
+  notifications: string[]
+  viewportOffset: number
+  parser: {
+    state: ScreenParserState
+    esc: string
+    osc: string
+    dcs: string
+    dcsStart: { row: number; col: number }
+    apc: string
+    utf8PendingBytes: number[]
+  }
+  unicode: {
+    charsetG0: boolean
+    lastChar: string
+    pendingRegionalIndicator: string | null
+    afterZWJ: boolean
+  }
+}
+
 export interface Screen {
   readonly cols: number
   readonly rows: number
@@ -88,6 +217,8 @@ export interface Screen {
   process(data: Uint8Array): void
   resize(cols: number, rows: number): void
   reset(): void
+  snapshot(): ScreenSnapshot
+  restore(snapshot: ScreenSnapshot): void
 
   getCell(row: number, col: number): ScreenCell
   getLine(row: number): ScreenCell[]
@@ -346,28 +477,14 @@ function isEmojiModifier(cp: number): boolean {
 
 // ── Internal attrs interface ───────────────────────────────────────────
 
-interface Attrs {
-  fg: CellColor | null
-  bg: CellColor | null
-  bold: boolean
-  faint: boolean
-  italic: boolean
-  underline: UnderlineStyle
-  underlineColor: CellColor | null
-  overline: boolean
-  strikethrough: boolean
-  inverse: boolean
-  hidden: boolean
-  blink: boolean
-  url: string | null
-}
+type Attrs = ScreenAttrsSnapshot
 
 // ── Screen factory ─────────────────────────────────────────────────────
 
 export function createScreen(options: ScreenOptions = {}): Screen {
   let cols = options.cols ?? 80
   let rows = options.rows ?? 24
-  const scrollbackLimit = options.scrollbackLimit ?? 1000
+  let scrollbackLimit = options.scrollbackLimit ?? 1000
   const onResponse = options.onResponse
 
   // Main and alternate screen buffers
@@ -468,17 +585,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let pointerBgColor: CellColor | null = null // OSC 14 / 114
   let highlightBgColor: CellColor | null = null // OSC 17 / 117
   let highlightFgColor: CellColor | null = null // OSC 19 / 119
-  type ColorStateSnapshot = {
-    palette256: CellColor[]
-    defaultFgColor: CellColor | null
-    defaultBgColor: CellColor | null
-    cursorColor: CellColor | null
-    specialColors: [number, CellColor][]
-    pointerFgColor: CellColor | null
-    pointerBgColor: CellColor | null
-    highlightBgColor: CellColor | null
-    highlightFgColor: CellColor | null
-  }
+  type ColorStateSnapshot = ScreenColorStateSnapshot
   const colorStack: ColorStateSnapshot[] = []
 
   function cloneColor(c: CellColor | null): CellColor | null {
@@ -510,6 +617,261 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     pointerBgColor = cloneColor(snapshot.pointerBgColor)
     highlightBgColor = cloneColor(snapshot.highlightBgColor)
     highlightFgColor = cloneColor(snapshot.highlightFgColor)
+  }
+
+  function cloneColorStateSnapshot(snapshot: ColorStateSnapshot): ColorStateSnapshot {
+    return {
+      palette256: snapshot.palette256.map((c) => ({ ...c })),
+      defaultFgColor: cloneColor(snapshot.defaultFgColor),
+      defaultBgColor: cloneColor(snapshot.defaultBgColor),
+      cursorColor: cloneColor(snapshot.cursorColor),
+      specialColors: snapshot.specialColors.map(([idx, color]) => [idx, { ...color }]),
+      pointerFgColor: cloneColor(snapshot.pointerFgColor),
+      pointerBgColor: cloneColor(snapshot.pointerBgColor),
+      highlightBgColor: cloneColor(snapshot.highlightBgColor),
+      highlightFgColor: cloneColor(snapshot.highlightFgColor),
+    }
+  }
+
+  function cloneAttrsSnapshot(source: Attrs): ScreenAttrsSnapshot {
+    return {
+      ...source,
+      fg: cloneColor(source.fg),
+      bg: cloneColor(source.bg),
+      underlineColor: cloneColor(source.underlineColor),
+    }
+  }
+
+  function cloneCellSnapshot(source: ScreenCell): ScreenCell {
+    return {
+      ...source,
+      fg: cloneColor(source.fg),
+      bg: cloneColor(source.bg),
+      underlineColor: cloneColor(source.underlineColor),
+    }
+  }
+
+  function isDefaultEmptyCell(cell: ScreenCell): boolean {
+    return (
+      cell.char === "" &&
+      cell.fg === null &&
+      cell.bg === null &&
+      cell.bold === false &&
+      cell.faint === false &&
+      cell.italic === false &&
+      cell.underline === "none" &&
+      cell.underlineColor === null &&
+      cell.overline === false &&
+      cell.strikethrough === false &&
+      cell.inverse === false &&
+      cell.hidden === false &&
+      cell.blink === false &&
+      cell.wide === false &&
+      cell.url === null
+    )
+  }
+
+  function restoreCellSnapshot(source: ScreenCell): ScreenCell {
+    const cell = cloneCellSnapshot(source)
+    return isDefaultEmptyCell(cell) ? EMPTY_CELL : cell
+  }
+
+  function cloneGridSnapshot(source: ScreenCell[][]): ScreenCell[][] {
+    return source.map((row) => row.map(cloneCellSnapshot))
+  }
+
+  function restoreGridSnapshot(source: ScreenCell[][], expectedRows: number, expectedCols: number): ScreenCell[][] {
+    const out: ScreenCell[][] = []
+    for (let row = 0; row < expectedRows; row++) {
+      const srcRow = source[row] ?? []
+      const dstRow = srcRow.slice(0, expectedCols).map(restoreCellSnapshot)
+      while (dstRow.length < expectedCols) dstRow.push(EMPTY_CELL)
+      out.push(dstRow)
+    }
+    return out
+  }
+
+  function restoreScrollbackSnapshot(source: ScreenCell[][]): ScreenCell[][] {
+    return source.map((row) => row.map(restoreCellSnapshot))
+  }
+
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null
+  }
+
+  function assertInteger(name: string, value: unknown, min = 0): asserts value is number {
+    if (!Number.isInteger(value) || (value as number) < min) {
+      throw new TypeError(`Invalid vterm snapshot ${name}`)
+    }
+  }
+
+  function assertString(name: string, value: unknown): asserts value is string {
+    if (typeof value !== "string") throw new TypeError(`Invalid vterm snapshot ${name}`)
+  }
+
+  function assertBoolean(name: string, value: unknown): asserts value is boolean {
+    if (typeof value !== "boolean") throw new TypeError(`Invalid vterm snapshot ${name}`)
+  }
+
+  function assertRecord(name: string, value: unknown): asserts value is Record<string, unknown> {
+    if (!isRecord(value)) throw new TypeError(`Invalid vterm snapshot ${name}`)
+  }
+
+  function assertGrid(name: string, value: unknown, expectedRows: number, expectedCols: number): void {
+    if (!Array.isArray(value) || value.length !== expectedRows) {
+      throw new TypeError(`Invalid vterm snapshot ${name}`)
+    }
+    for (const row of value) {
+      if (!Array.isArray(row) || row.length !== expectedCols) {
+        throw new TypeError(`Invalid vterm snapshot ${name}`)
+      }
+    }
+  }
+
+  function assertSoftWraps(name: string, value: unknown, expectedRows: number): void {
+    if (!Array.isArray(value) || value.length !== expectedRows || value.some((entry) => typeof entry !== "boolean")) {
+      throw new TypeError(`Invalid vterm snapshot ${name}`)
+    }
+  }
+
+  function assertSnapshot(snapshot: ScreenSnapshot): void {
+    const value: unknown = snapshot
+    if (!isRecord(value)) throw new TypeError("Invalid vterm snapshot")
+    if (value.version !== 1) {
+      throw new Error(`Unsupported vterm snapshot version: ${String(value.version)}`)
+    }
+    assertInteger("cols", value.cols, 1)
+    assertInteger("rows", value.rows, 1)
+    assertInteger("scrollbackLimit", value.scrollbackLimit, 0)
+    if (value.activeBuffer !== "main" && value.activeBuffer !== "alt") {
+      throw new TypeError("Invalid vterm snapshot activeBuffer")
+    }
+
+    const main = value.main
+    const alt = value.alt
+    assertRecord("main", main)
+    assertRecord("alt", alt)
+    assertGrid("main.grid", main.grid, value.rows, value.cols)
+    assertGrid("alt.grid", alt.grid, value.rows, value.cols)
+    assertSoftWraps("main.softWrapped", main.softWrapped, value.rows)
+    assertSoftWraps("alt.softWrapped", alt.softWrapped, value.rows)
+    if (!Array.isArray(value.scrollback)) throw new TypeError("Invalid vterm snapshot scrollback")
+
+    const cursor = value.cursor
+    assertRecord("cursor", cursor)
+    assertInteger("cursor.x", cursor.x)
+    assertInteger("cursor.y", cursor.y)
+    assertBoolean("cursor.visible", cursor.visible)
+    if (cursor.shape !== "block" && cursor.shape !== "underline" && cursor.shape !== "bar") {
+      throw new TypeError("Invalid vterm snapshot cursor.shape")
+    }
+    assertBoolean("cursor.blinking", cursor.blinking)
+    assertInteger("cursor.savedX", cursor.savedX)
+    assertInteger("cursor.savedY", cursor.savedY)
+
+    const saved = value.savedState
+    assertRecord("savedState", saved)
+    assertInteger("savedState.x", saved.x)
+    assertInteger("savedState.y", saved.y)
+    assertRecord("savedState.attrs", saved.attrs)
+    assertBoolean("savedState.originMode", saved.originMode)
+    assertBoolean("savedState.autoWrap", saved.autoWrap)
+    assertBoolean("savedState.charsetG0", saved.charsetG0)
+    assertRecord("attrs", value.attrs)
+
+    const modes = value.modes
+    assertRecord("modes", modes)
+    for (const name of [
+      "bracketedPaste",
+      "applicationCursor",
+      "applicationKeypad",
+      "autoWrap",
+      "mouseTracking",
+      "sgrMouse",
+      "focusTracking",
+      "origin",
+      "insert",
+      "reverseVideo",
+      "syncOutput",
+      "kittyGraphics",
+      "colorSchemeReporting",
+      "decColumn",
+      "altScroll",
+      "utf8Mouse",
+    ]) {
+      assertBoolean(`modes.${name}`, modes[name])
+    }
+    assertInteger("modes.mouseTrackingMode", modes.mouseTrackingMode)
+    assertInteger("modes.kittyKeyboardFlags", modes.kittyKeyboardFlags)
+    if (!Array.isArray(modes.kittyKeyboardStack)) {
+      throw new TypeError("Invalid vterm snapshot modes.kittyKeyboardStack")
+    }
+
+    const margins = value.margins
+    assertRecord("margins", margins)
+    assertInteger("margins.scrollTop", margins.scrollTop)
+    assertInteger("margins.scrollBottom", margins.scrollBottom)
+    assertBoolean("margins.leftRight", margins.leftRight)
+    assertInteger("margins.left", margins.left)
+    assertInteger("margins.right", margins.right)
+
+    const colors = value.colors
+    assertRecord("colors", colors)
+    assertRecord("colors.current", colors.current)
+    if (!Array.isArray(colors.stack)) throw new TypeError("Invalid vterm snapshot colors.stack")
+
+    if (!Array.isArray(value.tabStops)) throw new TypeError("Invalid vterm snapshot tabStops")
+    for (const stop of value.tabStops) assertInteger("tabStops", stop)
+    assertString("title", value.title)
+    assertString("clipboard", value.clipboard)
+    assertString("cwd", value.cwd)
+    if (!Array.isArray(value.notifications) || value.notifications.some((entry) => typeof entry !== "string")) {
+      throw new TypeError("Invalid vterm snapshot notifications")
+    }
+    assertInteger("viewportOffset", value.viewportOffset)
+
+    const parser = value.parser
+    assertRecord("parser", parser)
+    const parserStates: readonly ScreenParserState[] = [
+      "ground",
+      "escape",
+      "escape_charset",
+      "escape_hash",
+      "csi",
+      "osc",
+      "dcs",
+      "dcs_passthrough",
+      "osc_st",
+      "dcs_st",
+      "apc",
+      "apc_st",
+    ]
+    if (!parserStates.includes(parser.state as ScreenParserState)) {
+      throw new TypeError("Invalid vterm snapshot parser.state")
+    }
+    assertString("parser.esc", parser.esc)
+    assertString("parser.osc", parser.osc)
+    assertString("parser.dcs", parser.dcs)
+    assertRecord("parser.dcsStart", parser.dcsStart)
+    assertInteger("parser.dcsStart.row", parser.dcsStart.row)
+    assertInteger("parser.dcsStart.col", parser.dcsStart.col)
+    assertString("parser.apc", parser.apc)
+    if (!Array.isArray(parser.utf8PendingBytes)) {
+      throw new TypeError("Invalid vterm snapshot parser.utf8PendingBytes")
+    }
+    for (const byte of parser.utf8PendingBytes) {
+      assertInteger("parser.utf8PendingBytes", byte, 0)
+      if (byte > 0xff) throw new TypeError("Invalid vterm snapshot parser.utf8PendingBytes")
+    }
+
+    const unicode = value.unicode
+    assertRecord("unicode", unicode)
+    assertBoolean("unicode.charsetG0", unicode.charsetG0)
+    assertString("unicode.lastChar", unicode.lastChar)
+    if (unicode.pendingRegionalIndicator !== null) {
+      assertString("unicode.pendingRegionalIndicator", unicode.pendingRegionalIndicator)
+    }
+    assertBoolean("unicode.afterZWJ", unicode.afterZWJ)
   }
 
   // Tab stops: set of 0-based column indices. Defaults = every 8 cols.
@@ -594,19 +956,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let afterZWJ = false // Next character should join with previous cell
 
   // Parser state
-  let parserState:
-    | "ground"
-    | "escape"
-    | "escape_charset"
-    | "escape_hash"
-    | "csi"
-    | "osc"
-    | "dcs"
-    | "dcs_passthrough"
-    | "osc_st"
-    | "dcs_st"
-    | "apc"
-    | "apc_st" = "ground"
+  let parserState: ScreenParserState = "ground"
   let escBuf = ""
   let oscBuf = ""
   let dcsBuf = ""
@@ -616,6 +966,46 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   // Decoder for incoming bytes
   const decoder = new TextDecoder()
+  let utf8PendingBytes: number[] = []
+
+  function utf8SequenceLength(lead: number): number {
+    if (lead <= 0x7f) return 1
+    if (lead >= 0xc2 && lead <= 0xdf) return 2
+    if (lead >= 0xe0 && lead <= 0xef) return 3
+    if (lead >= 0xf0 && lead <= 0xf4) return 4
+    return 0
+  }
+
+  function utf8CompletePrefixLength(bytes: Uint8Array): number {
+    if (bytes.length === 0) return 0
+
+    let continuationCount = 0
+    let leadIndex = bytes.length - 1
+    while (leadIndex >= 0 && (bytes[leadIndex]! & 0xc0) === 0x80 && continuationCount < 3) {
+      continuationCount++
+      leadIndex--
+    }
+
+    if (leadIndex < 0) return bytes.length
+
+    const lead = bytes[leadIndex]!
+    const expectedLength = utf8SequenceLength(lead)
+    if (expectedLength === 0) return bytes.length
+
+    const availableLength = bytes.length - leadIndex
+    return expectedLength > availableLength ? leadIndex : bytes.length
+  }
+
+  function decodeInput(data: Uint8Array): string {
+    const bytes = new Uint8Array(utf8PendingBytes.length + data.length)
+    bytes.set(utf8PendingBytes, 0)
+    bytes.set(data, utf8PendingBytes.length)
+
+    const completeLength = utf8CompletePrefixLength(bytes)
+    utf8PendingBytes = Array.from(bytes.slice(completeLength))
+    if (completeLength === 0) return ""
+    return decoder.decode(bytes.slice(0, completeLength))
+  }
 
   // ── Grid helpers ──
 
@@ -2748,7 +3138,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     parserState = "ground"
     escBuf = ""
     oscBuf = ""
+    dcsBuf = ""
+    dcsStartRow = 0
+    dcsStartCol = 0
     apcBuf = ""
+    utf8PendingBytes = []
     semanticZones = []
     mainSoftWrapped = new Array(rows).fill(false)
     altSoftWrapped = new Array(rows).fill(false)
@@ -2758,7 +3152,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // ── Main parser ──
 
   function process(data: Uint8Array): void {
-    const text = decoder.decode(data, { stream: true })
+    const text = decodeInput(data)
 
     for (let i = 0; i < text.length; i++) {
       const ch = text[i]!
@@ -3208,6 +3602,190 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     clampCursor()
   }
 
+  // ── Snapshot / restore ──
+
+  function snapshot(): ScreenSnapshot {
+    return {
+      version: 1,
+      cols,
+      rows,
+      scrollbackLimit,
+      activeBuffer: useAltScreen ? "alt" : "main",
+      main: {
+        grid: cloneGridSnapshot(mainGrid),
+        softWrapped: [...mainSoftWrapped],
+      },
+      alt: {
+        grid: cloneGridSnapshot(altGrid),
+        softWrapped: [...altSoftWrapped],
+      },
+      scrollback: cloneGridSnapshot(scrollback),
+      cursor: {
+        x: curX,
+        y: curY,
+        visible: curVisible,
+        shape: cursorShape,
+        blinking: cursorBlinking,
+        savedX: savedCurX,
+        savedY: savedCurY,
+      },
+      savedState: {
+        x: savedState.curX,
+        y: savedState.curY,
+        attrs: cloneAttrsSnapshot(savedState.attrs),
+        originMode: savedState.originMode,
+        autoWrap: savedState.autoWrap,
+        charsetG0: savedState.charsetG0,
+      },
+      attrs: cloneAttrsSnapshot(attrs),
+      modes: {
+        bracketedPaste,
+        applicationCursor,
+        applicationKeypad,
+        autoWrap,
+        mouseTracking,
+        mouseTrackingMode,
+        sgrMouse,
+        focusTracking,
+        origin: originMode,
+        insert: insertMode,
+        reverseVideo,
+        syncOutput,
+        kittyKeyboardFlags,
+        kittyKeyboardStack: [...kittyKeyboardStack],
+        kittyGraphics: hasKittyGraphics,
+        colorSchemeReporting,
+        decColumn: decColumnMode,
+        altScroll: altScrollMode,
+        utf8Mouse: utf8MouseMode,
+      },
+      margins: {
+        scrollTop,
+        scrollBottom,
+        leftRight: leftRightMarginMode,
+        left: leftMargin,
+        right: rightMargin,
+      },
+      colors: {
+        current: snapshotColorState(),
+        stack: colorStack.map(cloneColorStateSnapshot),
+      },
+      tabStops: [...tabStops].sort((a, b) => a - b),
+      title,
+      clipboard,
+      cwd,
+      notifications: [...notifications],
+      viewportOffset,
+      parser: {
+        state: parserState,
+        esc: escBuf,
+        osc: oscBuf,
+        dcs: dcsBuf,
+        dcsStart: { row: dcsStartRow, col: dcsStartCol },
+        apc: apcBuf,
+        utf8PendingBytes: [...utf8PendingBytes],
+      },
+      unicode: {
+        charsetG0,
+        lastChar,
+        pendingRegionalIndicator,
+        afterZWJ,
+      },
+    }
+  }
+
+  function restore(snapshotValue: ScreenSnapshot): void {
+    assertSnapshot(snapshotValue)
+
+    cols = snapshotValue.cols
+    rows = snapshotValue.rows
+    scrollbackLimit = snapshotValue.scrollbackLimit
+    mainGrid = restoreGridSnapshot(snapshotValue.main.grid, rows, cols)
+    altGrid = restoreGridSnapshot(snapshotValue.alt.grid, rows, cols)
+    scrollback = restoreScrollbackSnapshot(snapshotValue.scrollback)
+    mainSoftWrapped = [...snapshotValue.main.softWrapped]
+    altSoftWrapped = [...snapshotValue.alt.softWrapped]
+    useAltScreen = snapshotValue.activeBuffer === "alt"
+    grid = useAltScreen ? altGrid : mainGrid
+    softWrapped = useAltScreen ? altSoftWrapped : mainSoftWrapped
+
+    curX = snapshotValue.cursor.x
+    curY = snapshotValue.cursor.y
+    curVisible = snapshotValue.cursor.visible
+    cursorShape = snapshotValue.cursor.shape
+    cursorBlinking = snapshotValue.cursor.blinking
+    savedCurX = snapshotValue.cursor.savedX
+    savedCurY = snapshotValue.cursor.savedY
+
+    savedState = {
+      curX: snapshotValue.savedState.x,
+      curY: snapshotValue.savedState.y,
+      attrs: cloneAttrsSnapshot(snapshotValue.savedState.attrs),
+      originMode: snapshotValue.savedState.originMode,
+      autoWrap: snapshotValue.savedState.autoWrap,
+      charsetG0: snapshotValue.savedState.charsetG0,
+    }
+    attrs = cloneAttrsSnapshot(snapshotValue.attrs)
+
+    bracketedPaste = snapshotValue.modes.bracketedPaste
+    applicationCursor = snapshotValue.modes.applicationCursor
+    applicationKeypad = snapshotValue.modes.applicationKeypad
+    autoWrap = snapshotValue.modes.autoWrap
+    mouseTracking = snapshotValue.modes.mouseTracking
+    mouseTrackingMode = snapshotValue.modes.mouseTrackingMode
+    sgrMouse = snapshotValue.modes.sgrMouse
+    focusTracking = snapshotValue.modes.focusTracking
+    originMode = snapshotValue.modes.origin
+    insertMode = snapshotValue.modes.insert
+    reverseVideo = snapshotValue.modes.reverseVideo
+    syncOutput = snapshotValue.modes.syncOutput
+    kittyKeyboardFlags = snapshotValue.modes.kittyKeyboardFlags
+    kittyKeyboardStack = [...snapshotValue.modes.kittyKeyboardStack]
+    hasKittyGraphics = snapshotValue.modes.kittyGraphics
+    colorSchemeReporting = snapshotValue.modes.colorSchemeReporting
+    decColumnMode = snapshotValue.modes.decColumn
+    altScrollMode = snapshotValue.modes.altScroll
+    utf8MouseMode = snapshotValue.modes.utf8Mouse
+
+    scrollTop = snapshotValue.margins.scrollTop
+    scrollBottom = snapshotValue.margins.scrollBottom
+    leftRightMarginMode = snapshotValue.margins.leftRight
+    leftMargin = snapshotValue.margins.left
+    rightMargin = snapshotValue.margins.right
+    restoreColorState(snapshotValue.colors.current)
+    colorStack.length = 0
+    colorStack.push(...snapshotValue.colors.stack.map(cloneColorStateSnapshot))
+    tabStops = new Set(snapshotValue.tabStops)
+    title = snapshotValue.title
+    clipboard = snapshotValue.clipboard
+    cwd = snapshotValue.cwd
+    notifications = [...snapshotValue.notifications]
+    viewportOffset = Math.max(0, Math.min(scrollback.length, snapshotValue.viewportOffset))
+
+    parserState = snapshotValue.parser.state
+    escBuf = snapshotValue.parser.esc
+    oscBuf = snapshotValue.parser.osc
+    dcsBuf = snapshotValue.parser.dcs
+    dcsStartRow = snapshotValue.parser.dcsStart.row
+    dcsStartCol = snapshotValue.parser.dcsStart.col
+    apcBuf = snapshotValue.parser.apc
+    utf8PendingBytes = [...snapshotValue.parser.utf8PendingBytes]
+    charsetG0 = snapshotValue.unicode.charsetG0
+    lastChar = snapshotValue.unicode.lastChar
+    pendingRegionalIndicator = snapshotValue.unicode.pendingRegionalIndicator
+    afterZWJ = snapshotValue.unicode.afterZWJ
+
+    textScale = 1
+    fontSize = 12
+    fontWindowSize = 12
+    locale = "en_US.UTF-8"
+    advancedClipboard = ""
+    semanticZones = []
+    hasSixel = false
+    sixelImages = []
+    clampCursor()
+  }
+
   // ── Accessors ──
 
   function getCell(row: number, col: number): ScreenCell {
@@ -3329,6 +3907,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     process,
     resize,
     reset: fullReset,
+    snapshot,
+    restore,
     getCell,
     getLine,
     getText,
