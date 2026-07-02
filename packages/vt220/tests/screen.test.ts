@@ -490,3 +490,95 @@ describe("Vt220Screen", () => {
     expect(s.getText()).toContain("ABC")
   })
 })
+
+describe("snapshot / restore (vt220 subset)", () => {
+  const enc2 = new TextEncoder()
+  const feedStr = (screen: Vt220Screen, s: string) => screen.process(enc2.encode(s))
+
+  function scenarioScreen(): Vt220Screen {
+    const screen = createVt220Screen({ cols: 20, rows: 4 })
+    feedStr(screen, "\x1b]0;my-title\x07")
+    feedStr(screen, "\x1b[?6h") // origin mode
+    feedStr(screen, "\x1b[4h") // insert mode
+    feedStr(screen, "\x1b[2;3r") // scroll region
+    feedStr(screen, "\x1b[1;31mred\x1b[0m plain\r\n")
+    feedStr(screen, "a\r\nb\r\nc\r\nd\r\ne\r\nf") // pushes rows into scrollback
+    return screen
+  }
+
+  test("round-trips grid, scrollback, cursor, title, modes, and scroll region", () => {
+    const original = scenarioScreen()
+    const restored = createVt220Screen({ cols: 20, rows: 4 })
+    restored.restore(original.snapshot())
+
+    expect(restored.getText()).toBe(original.getText())
+    expect(restored.getCursorPosition()).toEqual(original.getCursorPosition())
+    expect(restored.getTitle()).toBe("my-title")
+    expect(restored.getScrollbackLength()).toBe(original.getScrollbackLength())
+    for (const mode of ["originMode", "insertMode", "autoWrap", "reverseVideo"]) {
+      expect(restored.getMode(mode)).toBe(original.getMode(mode))
+    }
+    expect(restored.getCell(0, 0)).toEqual(original.getCell(0, 0))
+  })
+
+  test("restored screens continue identically (parser + resize state survive)", () => {
+    const original = scenarioScreen()
+    feedStr(original, "\x1b[") // park the parser mid-CSI at a cut point
+    const restored = createVt220Screen({ cols: 20, rows: 4 })
+    restored.restore(original.snapshot())
+
+    for (const screen of [original, restored]) {
+      feedStr(screen, "2Jafter") // completes the parked CSI, then text
+      screen.resize(30, 6)
+      feedStr(screen, " wide")
+    }
+    expect(restored.getText()).toBe(original.getText())
+    expect(restored.getCursorPosition()).toEqual(original.getCursorPosition())
+  })
+
+  test("snapshot schema stays locked to the VT220 subset", () => {
+    const snapshot = scenarioScreen().snapshot()
+    expect(Object.keys(snapshot).sort()).toEqual(
+      [
+        "attrs",
+        "cols",
+        "cursor",
+        "grid",
+        "modes",
+        "parser",
+        "rows",
+        "savedState",
+        "scrollRegion",
+        "scrollback",
+        "scrollbackLimit",
+        "title",
+        "version",
+        "viewportOffset",
+      ].sort(),
+    )
+    // vterm-only capabilities must not leak into the vt220 schema.
+    const flat = JSON.stringify(snapshot)
+    for (const forbidden of ["altScreen", "sixel", "hyperlink", "kitty", "semanticZone", "clipboard", "mouse"]) {
+      expect(flat).not.toContain(forbidden)
+    }
+  })
+
+  test("restore refuses unknown versions and malformed shapes loudly", () => {
+    const screen = createVt220Screen({ cols: 10, rows: 3 })
+    const good = screen.snapshot()
+    expect(() => screen.restore({ ...good, version: 2 as never })).toThrow(/version/)
+    expect(() => screen.restore({ ...good, grid: "nope" as never })).toThrow(/grid/)
+    expect(() => screen.restore(null as never)).toThrow(/Invalid/)
+  })
+
+  test("snapshot is a deep copy — later output does not mutate it", () => {
+    const screen = createVt220Screen({ cols: 10, rows: 3 })
+    feedStr(screen, "before")
+    const snapshot = screen.snapshot()
+    feedStr(screen, "\x1b[2Jafter")
+    const restored = createVt220Screen({ cols: 10, rows: 3 })
+    restored.restore(snapshot)
+    expect(restored.getText()).toContain("before")
+    expect(restored.getText()).not.toContain("after")
+  })
+})

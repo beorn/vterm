@@ -74,7 +74,7 @@ export interface ScreenOptions {
   onResponse?: (data: string) => void
 }
 
-interface Attrs {
+export interface Attrs {
   fg: CellColor | null
   bg: CellColor | null
   bold: boolean
@@ -84,12 +84,45 @@ interface Attrs {
   hidden: boolean
 }
 
+/**
+ * Serializable VT220 screen state — the same snapshot/restore API shape as
+ * vterm.js, restricted to the documented VT220 subset. Deliberately absent:
+ * truecolor/256-color, alternate screen, mouse tracking, hyperlinks,
+ * sixel/Kitty graphics, OSC clipboard, semantic zones, wide-char shaping.
+ * Do not widen without an explicit scope decision (km bead 20667).
+ */
+export interface ScreenSnapshot {
+  version: 1
+  cols: number
+  rows: number
+  scrollbackLimit: number
+  grid: ScreenCell[][]
+  scrollback: ScreenCell[][]
+  cursor: { x: number; y: number; visible: boolean; savedX: number; savedY: number }
+  savedState: { curX: number; curY: number; attrs: Attrs; originMode: boolean; autoWrap: boolean }
+  attrs: Attrs
+  title: string
+  modes: {
+    applicationCursor: boolean
+    applicationKeypad: boolean
+    autoWrap: boolean
+    originMode: boolean
+    insertMode: boolean
+    reverseVideo: boolean
+  }
+  scrollRegion: { top: number; bottom: number }
+  viewportOffset: number
+  parser: { state: "ground" | "escape" | "csi" | "osc" | "dcs" | "oscString"; escBuf: string; oscBuf: string }
+}
+
 export interface Screen {
   readonly cols: number
   readonly rows: number
   process(data: Uint8Array): void
   resize(cols: number, rows: number): void
   reset(): void
+  snapshot(): ScreenSnapshot
+  restore(snapshot: ScreenSnapshot): void
   getCell(row: number, col: number): ScreenCell
   getLine(row: number): ScreenCell[]
   getText(): string
@@ -1010,6 +1043,68 @@ export function createScreen(opts: ScreenOptions): Screen {
     }
   }
 
+  function snapshot(): ScreenSnapshot {
+    return structuredClone({
+      version: 1 as const,
+      cols,
+      rows,
+      scrollbackLimit,
+      grid,
+      scrollback,
+      cursor: { x: curX, y: curY, visible: curVisible, savedX: savedCurX, savedY: savedCurY },
+      savedState,
+      attrs,
+      title,
+      modes: { applicationCursor, applicationKeypad, autoWrap, originMode, insertMode, reverseVideo },
+      scrollRegion: { top: scrollTop, bottom: scrollBottom },
+      viewportOffset,
+      parser: { state: parserState, escBuf, oscBuf },
+    })
+  }
+
+  function restore(value: ScreenSnapshot): void {
+    if (typeof value !== "object" || value === null) throw new TypeError("Invalid vt220 snapshot")
+    if (value.version !== 1) throw new TypeError(`Unsupported vt220 snapshot version: ${String(value.version)}`)
+    for (const [name, n] of [
+      ["cols", value.cols],
+      ["rows", value.rows],
+      ["scrollbackLimit", value.scrollbackLimit],
+      ["viewportOffset", value.viewportOffset],
+    ] as const) {
+      if (!Number.isInteger(n) || n < 0) throw new TypeError(`Invalid vt220 snapshot ${name}`)
+    }
+    if (!Array.isArray(value.grid) || value.grid.length !== value.rows) {
+      throw new TypeError("Invalid vt220 snapshot grid")
+    }
+    if (!Array.isArray(value.scrollback)) throw new TypeError("Invalid vt220 snapshot scrollback")
+    const copy = structuredClone(value)
+    cols = copy.cols
+    rows = copy.rows
+    grid = copy.grid
+    scrollback = copy.scrollback
+    curX = copy.cursor.x
+    curY = copy.cursor.y
+    curVisible = copy.cursor.visible
+    savedCurX = copy.cursor.savedX
+    savedCurY = copy.cursor.savedY
+    savedState = copy.savedState
+    attrs = copy.attrs
+    title = copy.title
+    applicationCursor = copy.modes.applicationCursor
+    applicationKeypad = copy.modes.applicationKeypad
+    autoWrap = copy.modes.autoWrap
+    originMode = copy.modes.originMode
+    insertMode = copy.modes.insertMode
+    reverseVideo = copy.modes.reverseVideo
+    scrollTop = copy.scrollRegion.top
+    scrollBottom = copy.scrollRegion.bottom
+    viewportOffset = copy.viewportOffset
+    parserState = copy.parser.state
+    escBuf = copy.parser.escBuf
+    oscBuf = copy.parser.oscBuf
+    clampCursor()
+  }
+
   return {
     get cols() {
       return cols
@@ -1020,6 +1115,8 @@ export function createScreen(opts: ScreenOptions): Screen {
     process,
     resize,
     reset: fullReset,
+    snapshot,
+    restore,
     getCell,
     getLine,
     getText,
