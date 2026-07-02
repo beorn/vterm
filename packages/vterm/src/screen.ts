@@ -223,6 +223,8 @@ export interface Screen {
   getCell(row: number, col: number): ScreenCell
   getLine(row: number): ScreenCell[]
   getText(): string
+  /** Scrollback rows above the visible grid, oldest first, rendered like getText(). */
+  getScrollbackText(): string
   getTextRange(startRow: number, startCol: number, endRow: number, endCol: number): string
 
   getCursorPosition(): { x: number; y: number }
@@ -3808,6 +3810,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     return lines.join("\n")
   }
 
+  function getScrollbackText(): string {
+    const lines: string[] = []
+    for (const row of scrollback) {
+      lines.push(rowToString(row))
+    }
+    return lines.join("\n")
+  }
+
   function rowToString(row: ScreenCell[]): string {
     let line = ""
     for (let i = 0; i < row.length; i++) {
@@ -3912,6 +3922,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     getCell,
     getLine,
     getText,
+    getScrollbackText,
     getTextRange,
     getCursorPosition: () => ({ x: curX, y: curY }),
     getCursorVisible: () => curVisible,

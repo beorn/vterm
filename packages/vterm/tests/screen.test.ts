@@ -2287,3 +2287,21 @@ describe("snapshot / restore", () => {
     expect(restored.snapshot()).toEqual(uninterrupted.snapshot())
   })
 })
+
+describe("getScrollbackText", () => {
+  test("returns scrolled-off rows oldest-first, rendered like getText", () => {
+    const screen = screenWith("a\r\nb\r\nc\r\nd\r\ne", { cols: 10, rows: 3 })
+    expect(screen.getScrollbackText()).toBe("a\nb")
+    expect(screen.getText()).toBe("c\nd\ne")
+  })
+
+  test("is empty with no scrollback and survives snapshot round-trip", () => {
+    const fresh = screenWith("only", { cols: 10, rows: 3 })
+    expect(fresh.getScrollbackText()).toBe("")
+
+    const scrolled = screenWith("1\r\n2\r\n3\r\n4\r\n5", { cols: 10, rows: 3 })
+    const restored = createVtermScreen({ cols: 10, rows: 3 })
+    restored.restore(scrolled.snapshot())
+    expect(restored.getScrollbackText()).toBe(scrolled.getScrollbackText())
+  })
+})
