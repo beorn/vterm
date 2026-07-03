@@ -2199,7 +2199,7 @@ describe("snapshot / restore", () => {
     const snapshot = screen.snapshot()
 
     expect(() => {
-      screen.restore({ ...snapshot, version: 999 } as VtermScreenSnapshot)
+      screen.restore({ ...snapshot, version: 999 } as unknown as VtermScreenSnapshot)
     }).toThrow(/Unsupported vterm snapshot version/)
   })
 
