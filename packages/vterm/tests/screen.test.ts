@@ -2305,3 +2305,21 @@ describe("getScrollbackText", () => {
     expect(restored.getScrollbackText()).toBe(scrolled.getScrollbackText())
   })
 })
+
+describe("ECH background color erase", () => {
+  test("ECH erases with the current background (BCE), matching EL/ED", () => {
+    const screen = createVtermScreen({ cols: 10, rows: 2 })
+    const feed = (s: string) => screen.process(new TextEncoder().encode(s))
+    feed("abcdef")
+    feed("\x1b[1;2H") // cursor over "b"
+    feed("\x1b[48;2;10;20;30m\x1b[3X") // erase b,c,d with blue-ish bg
+    for (const col of [1, 2, 3]) {
+      const cell = screen.getCell(0, col)
+      expect(cell.char).toBe("")
+      expect(cell.bg).toEqual({ r: 10, g: 20, b: 30 })
+    }
+    expect(screen.getCell(0, 0).char).toBe("a")
+    expect(screen.getCell(0, 4).char).toBe("e")
+    expect(screen.getCell(0, 4).bg).toBeNull()
+  })
+})

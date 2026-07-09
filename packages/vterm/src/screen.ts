@@ -219,6 +219,8 @@ export interface Screen {
   reset(): void
   snapshot(): ScreenSnapshot
   restore(snapshot: ScreenSnapshot): void
+  /** Serialize the current state to minimal ANSI — `serializeSnapshot(this.snapshot(), options)`. */
+  serialize(options?: SerializeOptions): string
 
   getCell(row: number, col: number): ScreenCell
   getLine(row: number): ScreenCell[]
@@ -2110,11 +2112,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   }
 
   function handleEraseChars(count: number): void {
-    const row = grid[curY]
-    if (!row) return
-    for (let i = 0; i < count && curX + i < cols; i++) {
-      row[curX + i] = emptyCell()
-    }
+    // ECH erases with the current background (BCE), same as EL/ED — xterm,
+    // kitty, wezterm, and alacritty all agree. Delegate to the shared fill.
+    eraseCells(curY, curX, curY, Math.min(curX + count - 1, cols - 1))
   }
 
   // ── Column-oriented editing (SL / SR / DECIC / DECDC) ──
@@ -3938,5 +3938,314 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     scrollViewport,
     getSemanticZones: () => semanticZones.map((z) => ({ ...z })),
     getSixelImages: () => sixelImages.map((img) => ({ ...img })),
+    serialize: (options?: SerializeOptions) => serializeSnapshot(snapshot(), options),
   }
+}
+
+// ── State → minimal-ANSI serializer (pen-diff core) ────────────────────
+//
+// The lossy-but-faithful projection of a snapshot into a byte stream a fresh
+// same-size terminal can replay: scrollback history first (it scrolls into the
+// receiver's scrollback — CUP cannot address it), then a positioned screen
+// paint with per-run pen diffing, then finalization with the cursor LAST.
+// Mode/margin/alt-screen/cursor-shape emission belongs to the serializer-modes
+// slice; the only mode this core touches is DECAWM, disabled during the paint
+// (kills last-column/deferred-wrap artifacts) and restored to the snapshot's
+// value afterwards. The binary snapshot stays the lossless spine — this is a
+// projection for replay/preview consumers, not a state-transfer format.
+
+export interface SerializeOptions {
+  /** Emit scrollback history rows before the screen paint. Default: true. */
+  includeScrollback?: boolean
+  /** Emit the window title (OSC 0) when non-empty. Default: false. */
+  includeTitle?: boolean
+  /** Emit OSC 8 hyperlinks for cell and pending-pen urls. Default: true. */
+  hyperlinks?: boolean
+  /**
+   * Reserved for the mode-emission slice (DECSET/margins/DECSCUSR); inert
+   * here — this core emits no modes beyond the DECAWM paint discipline,
+   * which is correctness, not configuration.
+   */
+  excludeModes?: readonly string[]
+}
+
+/** The SGR-carried pen fields — `ScreenCell` minus `char`/`wide`/`url` (url travels via OSC 8). */
+type SerializePen = Pick<
+  ScreenCell,
+  | "fg"
+  | "bg"
+  | "bold"
+  | "faint"
+  | "italic"
+  | "underline"
+  | "underlineColor"
+  | "overline"
+  | "strikethrough"
+  | "inverse"
+  | "hidden"
+  | "blink"
+>
+
+const SERIALIZE_DEFAULT_PEN: SerializePen = Object.freeze({
+  fg: null,
+  bg: null,
+  bold: false,
+  faint: false,
+  italic: false,
+  underline: "none" as UnderlineStyle,
+  underlineColor: null,
+  overline: false,
+  strikethrough: false,
+  inverse: false,
+  hidden: false,
+  blink: false,
+})
+
+const SERIALIZE_BOOL_CODES = [
+  ["bold", "1"],
+  ["faint", "2"],
+  ["italic", "3"],
+  ["blink", "5"],
+  ["inverse", "7"],
+  ["hidden", "8"],
+  ["strikethrough", "9"],
+  ["overline", "53"],
+] as const satisfies readonly (readonly [keyof SerializePen, string])[]
+
+/** Colon-subparam underline forms — the lossless spellings vterm itself parses. */
+function serializeUnderlineParam(style: UnderlineStyle): string {
+  switch (style) {
+    case "single":
+      return "4"
+    case "double":
+      return "4:2"
+    case "curly":
+      return "4:3"
+    case "dotted":
+      return "4:4"
+    case "dashed":
+      return "4:5"
+    case "none":
+      return "24"
+  }
+}
+
+function serializeColorEq(a: CellColor | null, b: CellColor | null): boolean {
+  if (a === null || b === null) return a === b
+  return a.r === b.r && a.g === b.g && a.b === b.b
+}
+
+function serializePenOf(source: SerializePen): SerializePen {
+  return {
+    fg: source.fg,
+    bg: source.bg,
+    bold: source.bold,
+    faint: source.faint,
+    italic: source.italic,
+    underline: source.underline,
+    underlineColor: source.underlineColor,
+    overline: source.overline,
+    strikethrough: source.strikethrough,
+    inverse: source.inverse,
+    hidden: source.hidden,
+    blink: source.blink,
+  }
+}
+
+function serializePenEq(a: SerializePen, b: SerializePen): boolean {
+  return (
+    a.bold === b.bold &&
+    a.faint === b.faint &&
+    a.italic === b.italic &&
+    a.blink === b.blink &&
+    a.inverse === b.inverse &&
+    a.hidden === b.hidden &&
+    a.strikethrough === b.strikethrough &&
+    a.overline === b.overline &&
+    a.underline === b.underline &&
+    serializeColorEq(a.fg, b.fg) &&
+    serializeColorEq(a.bg, b.bg) &&
+    serializeColorEq(a.underlineColor, b.underlineColor)
+  )
+}
+
+function serializePenIsDefault(pen: SerializePen): boolean {
+  return serializePenEq(pen, SERIALIZE_DEFAULT_PEN)
+}
+
+function serializeColorParams(prefix: string, defaultCode: string, color: CellColor | null): string {
+  if (color === null) return defaultCode
+  return `${prefix};2;${String(color.r)};${String(color.g)};${String(color.b)}`
+}
+
+/**
+ * Reset-on-removal pen diff (the tmux `grid_string_cells` model): emit `SGR 0`
+ * iff a boolean attribute turns off or the underline changes away from a
+ * non-none style, then re-add deltas from the reset base. This makes the
+ * `SGR 22` bold/faint coupling and the underline-off classes structurally
+ * impossible, at a few bytes' cost. The leading `0` is emitted only on an
+ * actual reset (not whenever the previous pen happens to be default) so
+ * output stays byte-deterministic and idempotence-friendly.
+ */
+function serializeDiffPen(prev: SerializePen, cur: SerializePen): string[] {
+  let boolOff = false
+  for (const [key] of SERIALIZE_BOOL_CODES) {
+    if (prev[key] === true && cur[key] === false) {
+      boolOff = true
+      break
+    }
+  }
+  const underlineChanged = prev.underline !== cur.underline && prev.underline !== "none"
+  const reset = boolOff || underlineChanged
+  const base = reset ? SERIALIZE_DEFAULT_PEN : prev
+  const out: string[] = reset ? ["0"] : []
+  for (const [key, code] of SERIALIZE_BOOL_CODES) {
+    if (cur[key] === true && base[key] === false) out.push(code)
+  }
+  if (cur.underline !== base.underline) out.push(serializeUnderlineParam(cur.underline))
+  if (!serializeColorEq(cur.fg, base.fg)) out.push(serializeColorParams("38", "39", cur.fg))
+  if (!serializeColorEq(cur.bg, base.bg)) out.push(serializeColorParams("48", "49", cur.bg))
+  if (!serializeColorEq(cur.underlineColor, base.underlineColor)) {
+    out.push(serializeColorParams("58", "59", cur.underlineColor))
+  }
+  return out
+}
+
+/**
+ * Last cell worth emitting: trailing UNWRITTEN cells (`char === ""`, default
+ * pen, no url) are trimmed — the receiver's cleared screen already has them.
+ * Erased-with-bg trailing cells (BCE) are kept and reproduced via ECH.
+ */
+function serializeRowEnd(row: readonly ScreenCell[]): number {
+  let end = row.length
+  while (end > 0) {
+    const cell = row[end - 1]
+    if (cell === undefined) {
+      end--
+      continue
+    }
+    if (cell.char.length > 0 || cell.wide || cell.url !== null) break
+    if (!serializePenIsDefault(serializePenOf(cell))) break
+    end--
+  }
+  return end
+}
+
+/**
+ * Encode one row with per-run pen diffing. Invariants:
+ * - the terminal pen is DEFAULT at entry (rows end with `SGR 0`);
+ * - wide-cell spacers (char `""` following a `wide` cell) emit nothing;
+ * - runs of unwritten cells are SKIPPED via CHA (the sink's cells stay
+ *   genuinely empty — not painted as spaces), and erased-with-bg runs are
+ *   reproduced via SGR+ECH, so the sink grid equals the source grid natively;
+ * - an open OSC 8 hyperlink is always closed by row end.
+ */
+function serializeEncodeRow(row: readonly ScreenCell[], hyperlinks: boolean): string {
+  const end = serializeRowEnd(row)
+  let out = ""
+  let pen: SerializePen = SERIALIZE_DEFAULT_PEN
+  let openUrl: string | null = null
+  let col = 0
+  while (col < end) {
+    const cell = row[col]
+    if (cell === undefined) {
+      col++
+      continue
+    }
+    if (cell.char.length === 0 && col > 0 && row[col - 1]?.wide === true) {
+      col++ // wide-cell spacer — the wide char itself already produced it
+      continue
+    }
+    if (cell.char.length === 0 && cell.url === null) {
+      const runPen = serializePenOf(cell)
+      const runStart = col
+      while (col < end) {
+        const next = row[col]
+        if (next === undefined || next.char.length > 0 || next.url !== null) break
+        if (!serializePenEq(serializePenOf(next), runPen)) break
+        col++
+      }
+      const runLength = col - runStart
+      if (serializePenIsDefault(runPen)) {
+        out += `\x1b[${String(col + 1)}G` // skip — sink cells stay unwritten
+      } else {
+        const diff = serializeDiffPen(pen, runPen)
+        if (diff.length > 0) {
+          out += `\x1b[${diff.join(";")}m`
+          pen = runPen
+        }
+        out += `\x1b[${String(runLength)}X\x1b[${String(col + 1)}G` // ECH: erased-with-bg, exactly as BCE made them
+      }
+      continue
+    }
+    const cellPen = serializePenOf(cell)
+    const diff = serializeDiffPen(pen, cellPen)
+    if (diff.length > 0) {
+      out += `\x1b[${diff.join(";")}m`
+      pen = cellPen
+    }
+    const url = hyperlinks ? cell.url : null
+    if (url !== openUrl) {
+      out += url === null ? "\x1b]8;;\x1b\\" : `\x1b]8;;${url}\x1b\\`
+      openUrl = url
+    }
+    out += cell.char.length > 0 ? cell.char : " " // defensive: url-bearing empty cell paints as a linked space
+    col++
+  }
+  if (openUrl !== null) out += "\x1b]8;;\x1b\\"
+  return out
+}
+
+/**
+ * Serialize a snapshot to minimal ANSI a FRESH same-size terminal can replay.
+ *
+ * Phase order (cursor-last law): history → [title] → paint (DECAWM off,
+ * home+clear, positioned pen-diff rows) → finalize (autowrap per snapshot,
+ * pending pen, cursor visibility, final CUP). History rows flow via CRLF so
+ * they land in the receiver's scrollback — with a newline flush before the
+ * clear so the tail rows still on-screen scroll out instead of being wiped.
+ *
+ * Intended divergences (documented, not silent): modes/margins/alt-enter/
+ * DECSCUSR belong to the mode-emission slice; parser/pending-wrap/mid-parse
+ * state is unserializable to VT byte streams by design.
+ */
+export function serializeSnapshot(snapshot: ScreenSnapshot, options: SerializeOptions = {}): string {
+  const hyperlinks = options.hyperlinks !== false
+  const rows = snapshot.rows
+  const out: string[] = []
+
+  // Phase 1 — history (main-buffer scrollback), oldest first.
+  if (options.includeScrollback !== false && snapshot.scrollback.length > 0) {
+    for (const row of snapshot.scrollback) {
+      out.push(serializeEncodeRow(row, hyperlinks), "\x1b[0m\r\n")
+    }
+    // Flush: after flowing k history rows, min(k, rows-1) of them are still on
+    // the visible screen; exactly rows-1 newlines scroll them all into the
+    // receiver's scrollback before the clear below would wipe them.
+    if (rows > 1) out.push("\n".repeat(rows - 1))
+  }
+
+  // Phase 3 (optional, cheap) — title.
+  if (options.includeTitle === true && snapshot.title.length > 0) {
+    out.push(`\x1b]0;${snapshot.title}\x1b\\`)
+  }
+
+  // Phase 4 — paint: DECAWM off (kills last-column/deferred-wrap artifacts),
+  // home + clear, then positioned rows. Empty rows are skipped (2J blanked them).
+  out.push("\x1b[?7l", "\x1b[H\x1b[2J")
+  const grid = snapshot.activeBuffer === "alt" ? snapshot.alt.grid : snapshot.main.grid
+  for (let r = 0; r < rows; r++) {
+    const line = serializeEncodeRow(grid[r] ?? [], hyperlinks)
+    if (line.length === 0) continue
+    out.push(`\x1b[${String(r + 1)};1H`, line, "\x1b[0m")
+  }
+
+  // Phase 5 — finalize; cursor LAST (geometry/content emission above may move it).
+  out.push(snapshot.modes.autoWrap ? "\x1b[?7h" : "\x1b[?7l")
+  const penParams = serializeDiffPen(SERIALIZE_DEFAULT_PEN, serializePenOf(snapshot.attrs))
+  if (penParams.length > 0) out.push(`\x1b[${penParams.join(";")}m`)
+  if (hyperlinks && snapshot.attrs.url !== null) out.push(`\x1b]8;;${snapshot.attrs.url}\x1b\\`)
+  out.push(snapshot.cursor.visible ? "\x1b[?25h" : "\x1b[?25l")
+  out.push(`\x1b[${String(snapshot.cursor.y + 1)};${String(snapshot.cursor.x + 1)}H`)
+  return out.join("")
 }
