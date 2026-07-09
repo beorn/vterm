@@ -137,6 +137,14 @@ export interface ScreenSnapshot {
   main: ScreenBufferSnapshot
   alt: ScreenBufferSnapshot
   scrollback: ScreenCell[][]
+  /**
+   * Per-scrollback-row soft-wrap bit: true when the row soft-wraps INTO the
+   * following row (autowrap continued the same logical line below it) — the
+   * same semantics as `ScreenBufferSnapshot.softWrapped`. Parallel to
+   * `scrollback`. Absent in snapshots taken before this field existed —
+   * `restore()` treats missing as all-false (hard-wrapped).
+   */
+  scrollbackSoftWrapped: boolean[]
   cursor: {
     x: number
     y: number
@@ -760,6 +768,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     assertSoftWraps("main.softWrapped", main.softWrapped, value.rows)
     assertSoftWraps("alt.softWrapped", alt.softWrapped, value.rows)
     if (!Array.isArray(value.scrollback)) throw new TypeError("Invalid vterm snapshot scrollback")
+    // Optional (absent in pre-field snapshots); when present it must pair 1:1 with scrollback.
+    if (value.scrollbackSoftWrapped !== undefined) {
+      assertSoftWraps("scrollbackSoftWrapped", value.scrollbackSoftWrapped, value.scrollback.length)
+    }
 
     const cursor = value.cursor
     assertRecord("cursor", cursor)
@@ -951,6 +963,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let mainSoftWrapped: boolean[] = new Array(rows).fill(false)
   let altSoftWrapped: boolean[] = new Array(rows).fill(false)
   let softWrapped = mainSoftWrapped
+  // Parallel to `scrollback`: the departing row's soft-wrap bit, captured at scroll-out
+  let scrollbackSoftWrapped: boolean[] = []
 
   // Last printed character for REP
   let lastChar = ""
@@ -1078,8 +1092,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       // Move top row to scrollback (only if main screen & top of screen)
       if (grid === mainGrid && top === 0) {
         scrollback.push(grid[0]!)
+        scrollbackSoftWrapped.push(softWrapped[0] ?? false)
         if (scrollback.length > scrollbackLimit * 2) {
-          scrollback.splice(0, scrollback.length - scrollbackLimit)
+          const over = scrollback.length - scrollbackLimit
+          scrollback.splice(0, over)
+          scrollbackSoftWrapped.splice(0, over)
         }
       }
       for (let i = top; i < bottom; i++) {
@@ -1770,6 +1787,16 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           onResponse("\x1bP!|00000000\x1b\\")
         }
       }
+    } else if (finalByte === "u") {
+      // CSI = flags ; mode u — Set keyboard mode directly (Kitty keyboard protocol).
+      // Unlike push (CSI > u) this does NOT touch the stack; mode 1 assigns,
+      // 2 ORs the given flags in, 3 clears them.
+      const parts = params.split(";").map((s) => (s === "" ? 0 : parseInt(s, 10)))
+      const flags = parts[0] ?? 0
+      const mode = parts[1] ?? 1
+      if (mode === 2) kittyKeyboardFlags |= flags
+      else if (mode === 3) kittyKeyboardFlags &= ~flags
+      else kittyKeyboardFlags = flags
     }
   }
 
@@ -3076,6 +3103,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     altGrid = makeGrid(cols, rows)
     grid = mainGrid
     scrollback = []
+    scrollbackSoftWrapped = []
     curX = 0
     curY = 0
     curVisible = true
@@ -3622,6 +3650,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         softWrapped: [...altSoftWrapped],
       },
       scrollback: cloneGridSnapshot(scrollback),
+      scrollbackSoftWrapped: [...scrollbackSoftWrapped],
       cursor: {
         x: curX,
         y: curY,
@@ -3705,6 +3734,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     mainGrid = restoreGridSnapshot(snapshotValue.main.grid, rows, cols)
     altGrid = restoreGridSnapshot(snapshotValue.alt.grid, rows, cols)
     scrollback = restoreScrollbackSnapshot(snapshotValue.scrollback)
+    scrollbackSoftWrapped = snapshotValue.scrollbackSoftWrapped
+      ? [...snapshotValue.scrollbackSoftWrapped]
+      : new Array<boolean>(scrollback.length).fill(false)
     mainSoftWrapped = [...snapshotValue.main.softWrapped]
     altSoftWrapped = [...snapshotValue.alt.softWrapped]
     useAltScreen = snapshotValue.activeBuffer === "alt"
@@ -3942,17 +3974,30 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   }
 }
 
-// ── State → minimal-ANSI serializer (pen-diff core) ────────────────────
+// ── State → minimal-ANSI serializer (pen-diff core + mode emission) ────
 //
 // The lossy-but-faithful projection of a snapshot into a byte stream a fresh
-// same-size terminal can replay: scrollback history first (it scrolls into the
-// receiver's scrollback — CUP cannot address it), then a positioned screen
-// paint with per-run pen diffing, then finalization with the cursor LAST.
-// Mode/margin/alt-screen/cursor-shape emission belongs to the serializer-modes
-// slice; the only mode this core touches is DECAWM, disabled during the paint
-// (kills last-column/deferred-wrap artifacts) and restored to the snapshot's
-// value afterwards. The binary snapshot stays the lossless spine — this is a
-// projection for replay/preview consumers, not a state-transfer format.
+// same-size terminal can replay. Phase order (each constraint proven by the
+// mode round-trip matrix in the test suite):
+//   1 history   — scrollback flows via CRLF (CUP cannot address it); soft-wrap-
+//                 linked rows are re-linked through the receiver's own autowrap.
+//   2 geometry  — alt-enter (?1049h) and DECSTBM; both home the cursor and must
+//                 precede the paint. DECSLRM is NOT here: it clamps writes into
+//                 the margin box and would make outside columns unpaintable.
+//   3 modes     — paint-safe flags (DECSET set-forms only, never queries),
+//                 mouse (the exact stored mode), kitty keyboard (set + pushes),
+//                 default/palette colors, optional title.
+//   4 paint     — DECAWM off, home + clear, positioned pen-diff rows. Runs with
+//                 origin OFF, insert OFF, charset ASCII, no left/right margins —
+//                 the four states that corrupt positioned writes.
+//   5 finalize  — autowrap, cursor style, charset, insert, tab stops, DECSLRM,
+//                 pending pen, visibility, then origin + the final CUP LAST.
+// Never emitted (hard exclusions): ?2026 syncOutput (a static restore never
+// sends the closing ?2026l — it wedges a real receiver, and vterm's own write
+// path ignores the flag, so only a raw-absence assertion can police it) and
+// ?3 DECCOLM (erases the whole screen + homes). The binary snapshot stays the
+// lossless spine — this is a projection for replay/preview consumers, not a
+// state-transfer format.
 
 export interface SerializeOptions {
   /** Emit scrollback history rows before the screen paint. Default: true. */
@@ -3962,9 +4007,11 @@ export interface SerializeOptions {
   /** Emit OSC 8 hyperlinks for cell and pending-pen urls. Default: true. */
   hyperlinks?: boolean
   /**
-   * Reserved for the mode-emission slice (DECSET/margins/DECSCUSR); inert
-   * here — this core emits no modes beyond the DECAWM paint discipline,
-   * which is correctness, not configuration.
+   * Snapshot mode keys to skip during emission (e.g. `"bracketedPaste"`,
+   * `"mouseTracking"`, `"kittyKeyboardFlags"`, `"origin"`, `"insert"`).
+   * The receiver keeps its fresh default for excluded keys — an explicit,
+   * caller-requested divergence from the snapshot. DECAWM paint discipline
+   * is correctness, not configuration, and cannot be excluded.
    */
   excludeModes?: readonly string[]
 }
@@ -4139,9 +4186,18 @@ function serializeRowEnd(row: readonly ScreenCell[]): number {
  *   genuinely empty — not painted as spaces), and erased-with-bg runs are
  *   reproduced via SGR+ECH, so the sink grid equals the source grid natively;
  * - an open OSC 8 hyperlink is always closed by row end.
+ *
+ * `literalWidth > 0` switches to LITERAL mode for soft-wrap-linked history
+ * rows: every one of `literalWidth` columns is WRITTEN (unwritten cells as
+ * pen-carrying spaces — no CHA skips, no ECH, no trailing trim), so the last
+ * column write arms the receiver's pending-wrap and the next row's first
+ * character re-links the logical line. Cell-level cost: the receiver's
+ * scrollback holds written spaces where the source had unwritten cells —
+ * invisible to the text + wrap-bit projections that scrollback serves.
  */
-function serializeEncodeRow(row: readonly ScreenCell[], hyperlinks: boolean): string {
-  const end = serializeRowEnd(row)
+function serializeEncodeRow(row: readonly ScreenCell[], hyperlinks: boolean, literalWidth = 0): string {
+  const literal = literalWidth > 0
+  const end = literal ? literalWidth : serializeRowEnd(row)
   let out = ""
   let pen: SerializePen = SERIALIZE_DEFAULT_PEN
   let openUrl: string | null = null
@@ -4149,6 +4205,21 @@ function serializeEncodeRow(row: readonly ScreenCell[], hyperlinks: boolean): st
   while (col < end) {
     const cell = row[col]
     if (cell === undefined) {
+      if (!literal) {
+        col++
+        continue
+      }
+      const diff = serializeDiffPen(pen, SERIALIZE_DEFAULT_PEN)
+      if (diff.length > 0) {
+        out += `\x1b[${diff.join(";")}m`
+        pen = SERIALIZE_DEFAULT_PEN
+        if (diff[0] === "0") openUrl = null // SGR 0 also closes the link (see below)
+      }
+      if (openUrl !== null) {
+        out += "\x1b]8;;\x1b\\"
+        openUrl = null
+      }
+      out += " "
       col++
       continue
     }
@@ -4156,7 +4227,7 @@ function serializeEncodeRow(row: readonly ScreenCell[], hyperlinks: boolean): st
       col++ // wide-cell spacer — the wide char itself already produced it
       continue
     }
-    if (cell.char.length === 0 && cell.url === null) {
+    if (cell.char.length === 0 && cell.url === null && !literal) {
       const runPen = serializePenOf(cell)
       const runStart = col
       while (col < end) {
@@ -4173,6 +4244,7 @@ function serializeEncodeRow(row: readonly ScreenCell[], hyperlinks: boolean): st
         if (diff.length > 0) {
           out += `\x1b[${diff.join(";")}m`
           pen = runPen
+          if (diff[0] === "0") openUrl = null // SGR 0 also closes the link (see below)
         }
         out += `\x1b[${String(runLength)}X\x1b[${String(col + 1)}G` // ECH: erased-with-bg, exactly as BCE made them
       }
@@ -4183,6 +4255,11 @@ function serializeEncodeRow(row: readonly ScreenCell[], hyperlinks: boolean): st
     if (diff.length > 0) {
       out += `\x1b[${diff.join(";")}m`
       pen = cellPen
+      // vterm's SGR 0 resets the whole attr record INCLUDING the OSC 8 url
+      // (resetAttrs), so an emitted reset silently closes the receiver's link.
+      // Mirror that here so a same-url cell after a reset re-opens it — a
+      // harmless redundancy on terminals that keep OSC 8 orthogonal to SGR.
+      if (diff[0] === "0") openUrl = null
     }
     const url = hyperlinks ? cell.url : null
     if (url !== openUrl) {
@@ -4197,27 +4274,81 @@ function serializeEncodeRow(row: readonly ScreenCell[], hyperlinks: boolean): st
 }
 
 /**
+ * Paint-safe DECSET boolean flags emitted in phase 3 — set-forms only, emitted
+ * only when true (the receiver is fresh: every flag defaults to false). Origin
+ * and insert are deliberately NOT here — they corrupt a positioned paint and
+ * are restored in finalize instead.
+ */
+const SERIALIZE_DECSET_FLAGS = [
+  ["applicationCursor", 1],
+  ["reverseVideo", 5],
+  ["focusTracking", 1004],
+  ["utf8Mouse", 1005],
+  ["sgrMouse", 1006],
+  ["altScroll", 1007],
+  ["bracketedPaste", 2004],
+  ["colorSchemeReporting", 2031],
+] as const satisfies readonly (readonly [keyof ScreenSnapshot["modes"], number])[]
+
+/** Default palette shared by every serialize call (read-only baseline for OSC 4 diffs). */
+const SERIALIZE_DEFAULT_PALETTE: readonly CellColor[] = buildPalette256()
+
+/** `rgb:RR/GG/BB` — the XParseColor spelling vterm's own OSC parser round-trips exactly. */
+function serializeColorSpec(color: CellColor): string {
+  const hex = (v: number): string => v.toString(16).padStart(2, "0")
+  return `rgb:${hex(color.r)}/${hex(color.g)}/${hex(color.b)}`
+}
+
+/** DECSCUSR code for (shape, blinking); 1 (blinking block) is the fresh default. */
+function serializeCursorStyleCode(shape: "block" | "underline" | "bar", blinking: boolean): number {
+  const base = shape === "block" ? 1 : shape === "underline" ? 3 : 5
+  return blinking ? base : base + 1
+}
+
+/** True when `stops` (sorted) is exactly the fresh default — a stop every 8 columns. */
+function serializeTabStopsAreDefault(stops: readonly number[], cols: number): boolean {
+  let expected = 8
+  for (const stop of stops) {
+    if (stop !== expected) return false
+    expected += 8
+  }
+  return expected >= cols
+}
+
+/**
  * Serialize a snapshot to minimal ANSI a FRESH same-size terminal can replay.
+ * Phase order + the hard exclusion set are documented on the section header
+ * above; every ordering constraint is pinned by the mode round-trip matrix.
  *
- * Phase order (cursor-last law): history → [title] → paint (DECAWM off,
- * home+clear, positioned pen-diff rows) → finalize (autowrap per snapshot,
- * pending pen, cursor visibility, final CUP). History rows flow via CRLF so
- * they land in the receiver's scrollback — with a newline flush before the
- * clear so the tail rows still on-screen scroll out instead of being wiped.
- *
- * Intended divergences (documented, not silent): modes/margins/alt-enter/
- * DECSCUSR belong to the mode-emission slice; parser/pending-wrap/mid-parse
- * state is unserializable to VT byte streams by design.
+ * Intended divergences (documented, not silent): syncOutput/decColumn are
+ * never emitted; the inactive buffer, SCP saved cursor, DECSC saved state,
+ * color stack, and parser/pending-wrap/mid-parse state are unserializable to
+ * a VT byte stream by design — the binary snapshot carries them.
  */
 export function serializeSnapshot(snapshot: ScreenSnapshot, options: SerializeOptions = {}): string {
   const hyperlinks = options.hyperlinks !== false
+  const excluded = new Set(options.excludeModes ?? [])
   const rows = snapshot.rows
+  const m = snapshot.modes
   const out: string[] = []
 
-  // Phase 1 — history (main-buffer scrollback), oldest first.
+  // Phase 1 — history (main-buffer scrollback), oldest first, before any
+  // geometry (it must flow through a fresh unconstrained screen). A row whose
+  // soft-wrap bit is set continues INTO the next row: emit it at literal full
+  // width with no line break, and the receiver's own autowrap re-links the
+  // logical line — re-recording the wrap bit when the row scrolls out. The
+  // LAST history row's linkage (into visible screen row 0) is severed by
+  // design: the positioned paint below is not a flow (masked in the oracle).
   if (options.includeScrollback !== false && snapshot.scrollback.length > 0) {
-    for (const row of snapshot.scrollback) {
-      out.push(serializeEncodeRow(row, hyperlinks), "\x1b[0m\r\n")
+    const wraps = snapshot.scrollbackSoftWrapped
+    const last = snapshot.scrollback.length - 1
+    for (let i = 0; i < snapshot.scrollback.length; i++) {
+      const row = snapshot.scrollback[i]!
+      if (wraps?.[i] === true && i < last) {
+        out.push(serializeEncodeRow(row, hyperlinks, snapshot.cols), "\x1b[0m")
+      } else {
+        out.push(serializeEncodeRow(row, hyperlinks), "\x1b[0m\r\n")
+      }
     }
     // Flush: after flowing k history rows, min(k, rows-1) of them are still on
     // the visible screen; exactly rows-1 newlines scroll them all into the
@@ -4225,13 +4356,64 @@ export function serializeSnapshot(snapshot: ScreenSnapshot, options: SerializeOp
     if (rows > 1) out.push("\n".repeat(rows - 1))
   }
 
-  // Phase 3 (optional, cheap) — title.
+  // Phase 2 — geometry that must precede the paint. Both home the cursor;
+  // ?1049h also allocates a fresh blank alt grid — exactly the canvas the
+  // paint expects. (Known limitation, by design: while in alt, the main
+  // SCREEN is not emitted — main scrollback still is, and the binary
+  // snapshot carries the main grid. ?1049h also overwrites the receiver's
+  // SCP saved-cursor slot; cursor.savedX/savedY do not round-trip.)
+  if (snapshot.activeBuffer === "alt") out.push("\x1b[?1049h")
+  if (snapshot.margins.scrollTop !== 0 || snapshot.margins.scrollBottom !== rows - 1) {
+    out.push(
+      `\x1b[${String(snapshot.margins.scrollTop + 1)};${String(snapshot.margins.scrollBottom + 1)}r`,
+    )
+  }
+
+  // Phase 3 — paint-safe modes and receiver-level state. Set-forms only —
+  // query forms would make the receiver echo responses into its input.
+  for (const [key, code] of SERIALIZE_DECSET_FLAGS) {
+    if (m[key] === true && !excluded.has(key)) out.push(`\x1b[?${String(code)}h`)
+  }
+  if (m.mouseTracking && m.mouseTrackingMode > 0 && !excluded.has("mouseTracking")) {
+    // The EXACT stored mode — 9/1000/1002/1003/1015/1016, not a canonicalized subset.
+    out.push(`\x1b[?${String(m.mouseTrackingMode)}h`)
+  }
+  if (m.applicationKeypad && !excluded.has("applicationKeypad")) out.push("\x1b=")
+  if (
+    !excluded.has("kittyKeyboardFlags") &&
+    (m.kittyKeyboardFlags !== 0 || m.kittyKeyboardStack.length > 0)
+  ) {
+    // Rebuild (flags, stack): seed the stack bottom with `=` (set, no push),
+    // push the rest — each push captures the previous flags — then land on the
+    // live flags. Requires the CSI = u handler this slice added to the parser.
+    const stack = m.kittyKeyboardStack
+    if (stack.length === 0) {
+      out.push(`\x1b[=${String(m.kittyKeyboardFlags)}u`)
+    } else {
+      out.push(`\x1b[=${String(stack[0])}u`)
+      for (let i = 1; i < stack.length; i++) out.push(`\x1b[>${String(stack[i])}u`)
+      out.push(`\x1b[>${String(m.kittyKeyboardFlags)}u`)
+    }
+  }
+  const colors = snapshot.colors.current
+  if (colors.defaultFgColor) out.push(`\x1b]10;${serializeColorSpec(colors.defaultFgColor)}\x1b\\`)
+  if (colors.defaultBgColor) out.push(`\x1b]11;${serializeColorSpec(colors.defaultBgColor)}\x1b\\`)
+  for (let i = 0; i < colors.palette256.length; i++) {
+    const cur = colors.palette256[i]
+    const def = SERIALIZE_DEFAULT_PALETTE[i]
+    if (cur !== undefined && def !== undefined && !serializeColorEq(cur, def)) {
+      out.push(`\x1b]4;${String(i)};${serializeColorSpec(cur)}\x1b\\`)
+    }
+  }
   if (options.includeTitle === true && snapshot.title.length > 0) {
     out.push(`\x1b]0;${snapshot.title}\x1b\\`)
   }
 
   // Phase 4 — paint: DECAWM off (kills last-column/deferred-wrap artifacts),
-  // home + clear, then positioned rows. Empty rows are skipped (2J blanked them).
+  // home + clear, then positioned rows. Empty rows are skipped (2J blanked
+  // them). Runs with origin OFF, insert OFF, charset ASCII, and no left/right
+  // margins — the four states that corrupt positioned writes; each is
+  // restored in finalize below.
   out.push("\x1b[?7l", "\x1b[H\x1b[2J")
   const grid = snapshot.activeBuffer === "alt" ? snapshot.alt.grid : snapshot.main.grid
   for (let r = 0; r < rows; r++) {
@@ -4240,12 +4422,52 @@ export function serializeSnapshot(snapshot: ScreenSnapshot, options: SerializeOp
     out.push(`\x1b[${String(r + 1)};1H`, line, "\x1b[0m")
   }
 
-  // Phase 5 — finalize; cursor LAST (geometry/content emission above may move it).
-  out.push(snapshot.modes.autoWrap ? "\x1b[?7h" : "\x1b[?7l")
+  // Phase 5 — finalize, fixed order: autowrap → cursor style → charset →
+  // insert → tab stops (the CHA walk moves the cursor) → DECSLRM (homes the
+  // cursor) → pending pen → visibility → origin + final CUP LAST.
+  out.push(m.autoWrap ? "\x1b[?7h" : "\x1b[?7l")
+  if (snapshot.cursor.shape !== "block" || !snapshot.cursor.blinking) {
+    out.push(
+      `\x1b[${String(serializeCursorStyleCode(snapshot.cursor.shape, snapshot.cursor.blinking))} q`,
+    )
+  }
+  if (snapshot.unicode.charsetG0) out.push("\x1b(0")
+  if (m.insert && !excluded.has("insert")) out.push("\x1b[4h")
+  if (!serializeTabStopsAreDefault(snapshot.tabStops, snapshot.cols)) {
+    out.push("\x1b[3g")
+    for (const stop of snapshot.tabStops) {
+      // Stops at/past the width (possible only via a shrink-resize) cannot be
+      // planted — CHA would clamp and HTS would record a WRONG stop instead.
+      if (stop < snapshot.cols) out.push(`\x1b[${String(stop + 1)}G\x1bH`)
+    }
+  }
+  if (snapshot.margins.leftRight) {
+    out.push("\x1b[?69h")
+    if (snapshot.margins.left !== 0 || snapshot.margins.right !== snapshot.cols - 1) {
+      out.push(`\x1b[${String(snapshot.margins.left + 1)};${String(snapshot.margins.right + 1)}s`)
+    }
+  }
   const penParams = serializeDiffPen(SERIALIZE_DEFAULT_PEN, serializePenOf(snapshot.attrs))
   if (penParams.length > 0) out.push(`\x1b[${penParams.join(";")}m`)
   if (hyperlinks && snapshot.attrs.url !== null) out.push(`\x1b]8;;${snapshot.attrs.url}\x1b\\`)
   out.push(snapshot.cursor.visible ? "\x1b[?25h" : "\x1b[?25l")
-  out.push(`\x1b[${String(snapshot.cursor.y + 1)};${String(snapshot.cursor.x + 1)}H`)
+  // Origin precedes its CUP so region-relative coordinates can be used — this
+  // stays correct on real terminals that home the cursor on DECOM changes
+  // (vterm does not). A cursor OUTSIDE the region (reachable by setting ?6h
+  // after moving) is placed absolutely first, then origin is restored — the
+  // region-relative form would clamp it to the region.
+  const origin = m.origin && !excluded.has("origin")
+  const inRegion =
+    snapshot.cursor.y >= snapshot.margins.scrollTop &&
+    snapshot.cursor.y <= snapshot.margins.scrollBottom
+  if (origin && inRegion) {
+    out.push("\x1b[?6h")
+    out.push(
+      `\x1b[${String(snapshot.cursor.y - snapshot.margins.scrollTop + 1)};${String(snapshot.cursor.x + 1)}H`,
+    )
+  } else {
+    out.push(`\x1b[${String(snapshot.cursor.y + 1)};${String(snapshot.cursor.x + 1)}H`)
+    if (origin) out.push("\x1b[?6h")
+  }
   return out.join("")
 }

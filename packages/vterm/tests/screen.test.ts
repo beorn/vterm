@@ -1460,6 +1460,18 @@ describe("kitty keyboard protocol", () => {
     expect(screen.getMode("kittyKeyboard")).toBe(false)
   })
 
+  test("CSI = flags ; mode u sets flags without touching the stack", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    screen.process(enc.encode("\x1b[=5u")) // mode defaults to 1 (assign)
+    expect(screen.snapshot().modes.kittyKeyboardFlags).toBe(5)
+    expect(screen.snapshot().modes.kittyKeyboardStack).toEqual([])
+    screen.process(enc.encode("\x1b[=3;2u")) // mode 2: OR the given flags in
+    expect(screen.snapshot().modes.kittyKeyboardFlags).toBe(7)
+    screen.process(enc.encode("\x1b[=1;3u")) // mode 3: clear the given flags
+    expect(screen.snapshot().modes.kittyKeyboardFlags).toBe(6)
+    expect(screen.snapshot().modes.kittyKeyboardStack).toEqual([])
+  })
+
   test("CSI ? u queries keyboard mode", () => {
     let response = ""
     const screen = createVtermScreen({
@@ -2177,6 +2189,7 @@ describe("snapshot / restore", () => {
       "savedState",
       "scrollback",
       "scrollbackLimit",
+      "scrollbackSoftWrapped",
       "tabStops",
       "title",
       "unicode",

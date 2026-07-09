@@ -12,12 +12,15 @@
  *
  * Oracle contract (restore-equivalence): feed bytes into a source vterm; serialize its
  * snapshot; feed the result into a FRESH same-size sink; the sink's visible grid,
- * cursor (position + visibility), and pending pen must equal the source's. Output
+ * cursor (position + visibility + shape/blink), pending pen, modes (minus the
+ * documented exclusion set), margins, active buffer, tab stops, charset, default/
+ * palette colors, and scrollback soft-wrap bits must equal the source's. Output
  * assumes a fresh/reset sink — it does not clear modes it never set.
  *
- * Intended divergences (this slice emits no modes — the mode/margin/alt/DECSCUSR half
- * is the serializer-modes slice): sources here never mutate modes, margins, or the alt
- * screen, and parser/pending-wrap/mid-parse state is unserializable-to-VT by design.
+ * Intended divergences (documented in stateView below, asserted never-silent):
+ * syncOutput + decColumn are NEVER emitted (wedge/erase traps); the inactive buffer,
+ * SCP saved cursor, DECSC saved state, color/kitty stacks-by-construction limits,
+ * and parser/pending-wrap/mid-parse state are unserializable-to-VT by design.
  */
 import { describe, expect, test } from "vitest"
 import {
@@ -25,6 +28,7 @@ import {
   serializeSnapshot,
   type ScreenCell,
   type VtermScreen,
+  type VtermScreenSnapshot,
 } from "../src/index.ts"
 
 const ESC = "\x1b"
@@ -62,6 +66,57 @@ function cellView(cell: ScreenCell): Record<string, unknown> {
   return view
 }
 
+/**
+ * Modes NEVER emitted and NEVER compared — each with the reason it is excluded:
+ * - syncOutput: a static restore never sends the closing `?2026l`, so emitting
+ *   `?2026h` wedges a real receiver (vterm itself ignores it in the write path,
+ *   which is exactly why a round-trip oracle alone cannot police it — golden 7
+ *   asserts raw absence instead).
+ * - decColumn: `?3h/l` erases the whole screen and homes the cursor (DEC spec),
+ *   destroying the paint it would follow.
+ * - kittyGraphics: a latch with no image data behind it.
+ */
+const EXCLUDED_MODES = ["syncOutput", "decColumn", "kittyGraphics"] as const
+
+/**
+ * The non-cell state the serializer must round-trip. Documented exclusions
+ * (unserializable-to-VT by design, deliberately absent from this view):
+ * cursor.savedX/savedY (the `?1049h` alt-enter clobbers the SCP slot),
+ * savedState (DECSC reconstruction deferred — bead non-goal), colors.stack +
+ * arbitrary kitty stacks with a non-reconstructable shape (push-only snapshots),
+ * clipboard/cwd/notifications (intrusive or append-only receiver side effects),
+ * viewportOffset (receiver-owned view state), parser + unicode transients
+ * (mid-parse state), grid softWrapped bits (a positioned paint is not a flow —
+ * only SCROLLBACK wrap bits survive, and those ARE compared), and the inactive
+ * buffer's grid (a byte stream paints one screen; the binary snapshot carries it).
+ */
+function stateView(snap: VtermScreenSnapshot): Record<string, unknown> {
+  const modes: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(snap.modes)) {
+    if (!(EXCLUDED_MODES as readonly string[]).includes(key)) modes[key] = value
+  }
+  return {
+    modes,
+    activeBuffer: snap.activeBuffer,
+    margins: snap.margins,
+    cursorShape: snap.cursor.shape,
+    cursorBlinking: snap.cursor.blinking,
+    tabStops: snap.tabStops,
+    charsetG0: snap.unicode.charsetG0,
+    // The LAST index is masked on both sides: a true bit there says the final
+    // history row wraps INTO visible screen row 0 — a linkage the positioned
+    // paint severs by design (a paint is not a flow), so it cannot round-trip.
+    scrollbackSoftWrapped: snap.scrollbackSoftWrapped?.map((bit, i, arr) =>
+      i === arr.length - 1 ? false : bit,
+    ),
+    colors: {
+      defaultFgColor: snap.colors.current.defaultFgColor,
+      defaultBgColor: snap.colors.current.defaultBgColor,
+      palette256: snap.colors.current.palette256,
+    },
+  }
+}
+
 /** Serialize source → feed a fresh same-size sink → assert restore-equivalence. */
 function roundTripState(source: VtermScreen, cols: number, rows: number): VtermScreen {
   const snapshot = source.snapshot()
@@ -79,6 +134,7 @@ function roundTripState(source: VtermScreen, cols: number, rows: number): VtermS
   expect(sink.getCursorPosition(), "cursor position").toEqual(source.getCursorPosition())
   expect(sink.getCursorVisible(), "cursor visibility").toBe(source.getCursorVisible())
   expect(sink.snapshot().attrs, "pending pen").toEqual(snapshot.attrs)
+  expect(stateView(sink.snapshot()), "non-cell state (oracle ii)").toEqual(stateView(snapshot))
   return sink
 }
 
@@ -96,8 +152,10 @@ function mulberry32(seed: number): () => number {
 }
 
 /**
- * Random attributed-screen source. Ops deliberately exclude mode mutations
- * (DECSET/alt/margins) — out of this slice's carried scope (see header).
+ * Random attributed-screen source. The mode pool covers every emitted mode
+ * family (DECSET flags, alt screen, margins, DECSCUSR, charset, kitty,
+ * colors, tab stops) — but NOT syncOutput/decColumn, whose destructive
+ * set-sequences are excluded by design and pinned by goldens 7/7b instead.
  */
 function randomSource(rand: () => number, cols: number, rows: number): VtermScreen {
   const screen = mkScreen(cols, rows)
@@ -110,9 +168,21 @@ function randomSource(rand: () => number, cols: number, rows: number): VtermScre
     "38;2;200;40;120", "48;2;10;90;230", "38;5;178", "48;5;24", "58;2;250;250;60", "59",
   ] as const
   const words = ["hei", "verden", "汉字", "🎈", "ab c", "x", "…tail"] as const
+  const modePool = [
+    `${ESC}[?6h`, `${ESC}[?6l`, `${ESC}[4h`, `${ESC}[4l`, `${ESC}[?5h`, `${ESC}[?1h`,
+    `${ESC}=`, `${ESC}>`, `${ESC}[?2004h`, `${ESC}[?1004h`, `${ESC}[?1007h`,
+    `${ESC}[?2031h`, `${ESC}[?1000h`, `${ESC}[?1003h`, `${ESC}[?1016h`, `${ESC}[?1000l`,
+    `${ESC}[?1006h`, `${ESC}[?1005h`, `${ESC}[=5u`, `${ESC}[>13u`, `${ESC}[<u`,
+    `${ESC}[2;4r`, `${ESC}[r`, `${ESC}[?69h${ESC}[2;10s`, `${ESC}[?69l`,
+    `${ESC}[3 q`, `${ESC}[2 q`, `${ESC}[0 q`, `${ESC}(0`, `${ESC}(B`,
+    `${ESC}[?1049h`, `${ESC}[?1049l`,
+    `${ESC}]10;rgb:aa/bb/cc${ESC}\\`, `${ESC}]11;#204060${ESC}\\`, `${ESC}]110${ESC}\\`,
+    `${ESC}]4;100;rgb:11/22/33${ESC}\\`,
+    `${ESC}H`, `${ESC}[3g`,
+  ] as const
   const opCount = 24 + int(24)
   for (let i = 0; i < opCount; i++) {
-    switch (int(6)) {
+    switch (int(7)) {
       case 0:
         feed(screen, `${ESC}[${pick(sgrPool)}m`)
         break
@@ -128,8 +198,11 @@ function randomSource(rand: () => number, cols: number, rows: number): VtermScre
       case 4:
         feed(screen, `${ESC}[${String(int(2))}K`)
         break
-      default:
+      case 5:
         feed(screen, `${ESC}]8;;${rand() < 0.5 ? "https://x.test/a" : ""}${ESC}\\`)
+        break
+      default:
+        feed(screen, pick(modePool))
         break
     }
   }
@@ -277,6 +350,19 @@ describe("serializeSnapshot — pen goldens", () => {
     expect(sink.getCell(0, 3).wide).toBe(true)
   })
 
+  test("golden 6b: wide char ending AT the right margin + ZWJ family + VS-16 graphemes", () => {
+    const source = mkScreen(10, 3)
+    feed(source, `${ESC}[1;9H汉`) // wide char occupying the last two columns
+    feed(source, `${ESC}[2;1H👨‍👩‍👧 x`) // ZWJ family — one grapheme cell
+    feed(source, `${ESC}[3;1H❤️ done`) // heart + VS-16 (emoji presentation)
+    const sink = roundTripState(source, 10, 3)
+    expect(sink.getCell(0, 8).char).toBe("汉")
+    expect(sink.getCell(0, 8).wide).toBe(true)
+    expect(sink.getCell(0, 9).char).toBe("")
+    expect(sink.getCell(1, 0).char).toBe("👨‍👩‍👧")
+    expect(sink.getCell(2, 0).char).toBe("❤️")
+  })
+
   test("golden 10: pending pen — post-restore keystrokes inherit the live pen", () => {
     const source = mkScreen(20, 2)
     feed(source, `out`)
@@ -332,5 +418,272 @@ describe("serializeSnapshot — pen goldens", () => {
     const source = mkScreen(16, 2)
     feed(source, `${ESC}[1mhey`)
     expect(source.serialize()).toBe(serializeSnapshot(source.snapshot()))
+  })
+})
+
+// ── Serializer-modes slice: parser gaps (red-first) ────────────────────
+
+describe("kitty keyboard set-flags (CSI = u) — the parser gap the emitter needs", () => {
+  test("CSI = flags u sets flags WITHOUT pushing the stack", () => {
+    const s = mkScreen(20, 4)
+    feed(s, `${ESC}[=5u`)
+    expect(s.snapshot().modes.kittyKeyboardFlags).toBe(5)
+    expect(s.snapshot().modes.kittyKeyboardStack).toEqual([])
+    feed(s, `${ESC}[=0u`)
+    expect(s.snapshot().modes.kittyKeyboardFlags).toBe(0)
+    expect(s.snapshot().modes.kittyKeyboardStack).toEqual([])
+  })
+
+  test("set + push composes: arbitrary (flags, stack) states become reachable", () => {
+    const s = mkScreen(20, 4)
+    // Without `=`, the first push always captures 0 — (flags≠0, stack=[s0≠0]) was unreachable.
+    feed(s, `${ESC}[=2u${ESC}[>13u`)
+    expect(s.snapshot().modes.kittyKeyboardFlags).toBe(13)
+    expect(s.snapshot().modes.kittyKeyboardStack).toEqual([2])
+  })
+})
+
+describe("scrollback soft-wrap bits — the model add", () => {
+  test("rows scrolled into history carry their soft-wrap bit in the snapshot", () => {
+    const s = mkScreen(10, 3)
+    feed(s, "A".repeat(25)) // row0 full, wraps → row1 full, wraps → row2 "AAAAA"
+    feed(s, "\r\ntail1\r\ntail2\r\ntail3") // scroll all three A-rows out
+    const snap = s.snapshot()
+    expect(s.getScrollbackLength()).toBeGreaterThanOrEqual(3)
+    expect(snap.scrollbackSoftWrapped).toBeDefined()
+    expect(snap.scrollbackSoftWrapped.length).toBe(snap.scrollback.length)
+    // Same semantics as the grid's softWrapped: bit i true = row i wraps INTO row i+1.
+    expect(snap.scrollbackSoftWrapped[0]).toBe(true) // full row, wrapped into the next
+    expect(snap.scrollbackSoftWrapped[1]).toBe(true) // full row, wrapped into the next
+    expect(snap.scrollbackSoftWrapped[2]).toBe(false) // "AAAAA" — the line's final row
+  })
+
+  test("restore round-trips the bits; absent field defaults to hard-wrapped", () => {
+    const s = mkScreen(10, 3)
+    feed(s, "B".repeat(15))
+    feed(s, "\r\nx\r\ny\r\nz")
+    const snap = s.snapshot()
+    const twin = mkScreen(10, 3)
+    twin.restore(snap)
+    expect(twin.snapshot().scrollbackSoftWrapped).toEqual(snap.scrollbackSoftWrapped)
+    // Forward-compat: a version-1 snapshot without the field restores as all-false.
+    const legacy = { ...snap, scrollbackSoftWrapped: undefined }
+    const old = mkScreen(10, 3)
+    old.restore(legacy as unknown as VtermScreenSnapshot)
+    expect(old.snapshot().scrollbackSoftWrapped).toEqual(
+      new Array(snap.scrollback.length).fill(false),
+    )
+  })
+
+  test("serialized history preserves wrap linkage: a rewrapped logical line stays one line", () => {
+    const s = mkScreen(10, 3)
+    feed(s, "C".repeat(22)) // one logical line across three rows
+    feed(s, "\r\nx\r\ny\r\nz") // push all three into scrollback
+    const snap = s.snapshot()
+    const sink = mkScreen(10, 3)
+    feed(sink, serializeSnapshot(snap))
+    expect(sink.getScrollbackText()).toBe(s.getScrollbackText())
+    expect(sink.snapshot().scrollbackSoftWrapped).toEqual(snap.scrollbackSoftWrapped)
+  })
+})
+
+// ── Serializer-modes slice: emission goldens + matrix ───────────────────
+
+describe("serializeSnapshot — mode emission", () => {
+  /** One entry per emitted mode family (bead golden 9 — the reattach matrix). */
+  const MODE_MATRIX: readonly (readonly [
+    name: string,
+    setup: string,
+    check: (snap: VtermScreenSnapshot) => void,
+  ])[] = [
+    ["origin ?6", `${ESC}[?6h`, (m) => expect(m.modes.origin).toBe(true)],
+    ["insert IRM 4", `${ESC}[4h`, (m) => expect(m.modes.insert).toBe(true)],
+    ["reverse ?5", `${ESC}[?5h`, (m) => expect(m.modes.reverseVideo).toBe(true)],
+    ["app-cursor ?1", `${ESC}[?1h`, (m) => expect(m.modes.applicationCursor).toBe(true)],
+    ["app-keypad ESC=", `${ESC}=`, (m) => expect(m.modes.applicationKeypad).toBe(true)],
+    ["bracketed ?2004", `${ESC}[?2004h`, (m) => expect(m.modes.bracketedPaste).toBe(true)],
+    ["focus ?1004", `${ESC}[?1004h`, (m) => expect(m.modes.focusTracking).toBe(true)],
+    ["altScroll ?1007", `${ESC}[?1007h`, (m) => expect(m.modes.altScroll).toBe(true)],
+    ["colorScheme ?2031", `${ESC}[?2031h`, (m) => expect(m.modes.colorSchemeReporting).toBe(true)],
+    [
+      "mouse all-events ?1003",
+      `${ESC}[?1003h`,
+      (m) => {
+        expect(m.modes.mouseTracking).toBe(true)
+        expect(m.modes.mouseTrackingMode).toBe(1003)
+      },
+    ],
+    [
+      "mouse pixel ?1016 (exact stored code, not just 1000/1002/1003)",
+      `${ESC}[?1016h`,
+      (m) => expect(m.modes.mouseTrackingMode).toBe(1016),
+    ],
+    ["sgrMouse ?1006", `${ESC}[?1006h`, (m) => expect(m.modes.sgrMouse).toBe(true)],
+    ["utf8Mouse ?1005", `${ESC}[?1005h`, (m) => expect(m.modes.utf8Mouse).toBe(true)],
+    [
+      "kitty flags + stack",
+      `${ESC}[=2u${ESC}[>13u`,
+      (m) => {
+        expect(m.modes.kittyKeyboardFlags).toBe(13)
+        expect(m.modes.kittyKeyboardStack).toEqual([2])
+      },
+    ],
+    [
+      "DECSTBM margins",
+      `${ESC}[2;5r`,
+      (m) => {
+        expect(m.margins.scrollTop).toBe(1)
+        expect(m.margins.scrollBottom).toBe(4)
+      },
+    ],
+    [
+      "DECSLRM left/right margins",
+      `${ESC}[?69h${ESC}[3;8s`,
+      (m) => {
+        expect(m.margins.leftRight).toBe(true)
+        expect(m.margins.left).toBe(2)
+        expect(m.margins.right).toBe(7)
+      },
+    ],
+    [
+      "cursor shape steady underline (DECSCUSR 4)",
+      `${ESC}[4 q`,
+      (m) => {
+        expect(m.cursor.shape).toBe("underline")
+        expect(m.cursor.blinking).toBe(false)
+      },
+    ],
+    ["charset DEC graphics ESC(0", `${ESC}(0`, (m) => expect(m.unicode.charsetG0).toBe(true)],
+    [
+      "default colors OSC 10/11",
+      `${ESC}]10;rgb:aa/bb/cc${ESC}\\${ESC}]11;#102030${ESC}\\`,
+      (m) => {
+        expect(m.colors.current.defaultFgColor).toEqual({ r: 0xaa, g: 0xbb, b: 0xcc })
+        expect(m.colors.current.defaultBgColor).toEqual({ r: 0x10, g: 0x20, b: 0x30 })
+      },
+    ],
+    [
+      "palette entry OSC 4",
+      `${ESC}]4;17;rgb:01/02/03${ESC}\\`,
+      (m) => expect(m.colors.current.palette256[17]).toEqual({ r: 1, g: 2, b: 3 }),
+    ],
+    [
+      "custom tab stops (TBC + HTS)",
+      `${ESC}[3g${ESC}[1;6H${ESC}H${ESC}[1;21H${ESC}H`,
+      (m) => expect(m.tabStops).toEqual([5, 20]),
+    ],
+  ] as const
+
+  for (const [name, setup, check] of MODE_MATRIX) {
+    test(`matrix: ${name} survives reattach`, () => {
+      const source = mkScreen(30, 6)
+      feed(source, "content\r\nrow-two")
+      feed(source, setup)
+      const sink = roundTripState(source, 30, 6)
+      check(sink.snapshot())
+    })
+  }
+
+  test("alt screen: activeBuffer + alt content round-trip (?1049h precedes the paint)", () => {
+    const source = mkScreen(20, 6)
+    feed(source, "on main")
+    feed(source, `${ESC}[?1049h`)
+    feed(source, `${ESC}[1;1HALT ROW`)
+    const ansi = serializeSnapshot(source.snapshot())
+    expect(ansi.indexOf("?1049h")).toBeGreaterThanOrEqual(0)
+    expect(ansi.indexOf("?1049h")).toBeLessThan(ansi.indexOf("\x1b[2J"))
+    const sink = roundTripState(source, 20, 6)
+    expect(sink.snapshot().activeBuffer).toBe("alt")
+    expect(sink.getText()).toBe(source.getText())
+  })
+
+  test("golden 7: syncOutput is NEVER emitted (?2026h would wedge a real receiver)", () => {
+    const source = mkScreen(20, 3)
+    feed(source, "x")
+    feed(source, `${ESC}[?2026h`)
+    const snap = source.snapshot()
+    expect(snap.modes.syncOutput).toBe(true)
+    // vterm itself ignores syncOutput in its write path, so the round-trip oracle
+    // is structurally blind here — this raw ABSENCE assertion is the only guard.
+    const ansi = serializeSnapshot(snap)
+    expect(ansi).not.toContain("?2026")
+    const sink = mkScreen(20, 3)
+    feed(sink, ansi)
+    expect(sink.snapshot().modes.syncOutput).toBe(false) // documented divergence
+  })
+
+  test("golden 7b: decColumn is NEVER emitted (?3h/l erases the whole screen)", () => {
+    const source = mkScreen(20, 3)
+    feed(source, `${ESC}[?3h`)
+    feed(source, "after-colm")
+    const snap = source.snapshot()
+    expect(snap.modes.decColumn).toBe(true)
+    const ansi = serializeSnapshot(snap)
+    expect(ansi).not.toMatch(/\x1b\[\?3[hl]/)
+    const sink = mkScreen(20, 3)
+    feed(sink, ansi)
+    expect(sink.snapshot().modes.decColumn).toBe(false) // documented divergence
+    expect(sink.getText()).toBe(source.getText())
+  })
+
+  test("golden 8: cursor lands exactly after geometry (margins + origin)", () => {
+    const source = mkScreen(20, 8)
+    feed(source, `${ESC}[2;6r`) // DECSTBM rows 2..6 — homes the cursor
+    feed(source, `${ESC}[?6h`) // origin ON — CUP becomes region-relative
+    feed(source, `${ESC}[3;4H`) // region-relative → absolute row 4 (0-based 3), col 4 (0-based 3)
+    feed(source, "MID")
+    const sink = roundTripState(source, 20, 8)
+    expect(sink.getCursorPosition()).toEqual({ x: 6, y: 3 })
+  })
+
+  test("golden 8b: alt screen + margins + mid-screen cursor", () => {
+    const source = mkScreen(20, 6)
+    feed(source, "main content")
+    feed(source, `${ESC}[?1049h`)
+    feed(source, "ALT")
+    feed(source, `${ESC}[3;5r${ESC}[4;7H`)
+    const sink = roundTripState(source, 20, 6)
+    expect(sink.snapshot().activeBuffer).toBe("alt")
+  })
+
+  test("insert mode restores AFTER the paint — painted cells are not insert-shifted", () => {
+    const source = mkScreen(20, 3)
+    feed(source, "abcdef")
+    feed(source, `${ESC}[4h`)
+    const sink = roundTripState(source, 20, 3)
+    expect(sink.snapshot().modes.insert).toBe(true)
+    expect(sink.getText()).toBe(source.getText())
+  })
+
+  test("charset: painted glyphs are the translated cells; ESC(0 restored in finalize", () => {
+    const source = mkScreen(20, 3)
+    feed(source, `${ESC}(0qqq${ESC}(B plain ${ESC}(0`)
+    const snap = source.snapshot()
+    expect(snap.unicode.charsetG0).toBe(true)
+    const sink = roundTripState(source, 20, 3)
+    // 'q' under DEC Special Graphics stored as the translated glyph; the paint
+    // (which runs under ASCII) must reproduce it literally.
+    expect(sink.getCell(0, 0).char).toBe(source.getCell(0, 0).char)
+  })
+
+  test("DECSCUSR emitted only when non-default (default is blinking block)", () => {
+    const plain = mkScreen(20, 3)
+    feed(plain, "x")
+    expect(serializeSnapshot(plain.snapshot())).not.toContain(" q")
+    const styled = mkScreen(20, 3)
+    feed(styled, `${ESC}[4 q`)
+    expect(serializeSnapshot(styled.snapshot())).toContain(" q")
+  })
+
+  test("excludeModes: listed snapshot-mode keys are skipped", () => {
+    const source = mkScreen(20, 3)
+    feed(source, `${ESC}[?2004h${ESC}[?1004h`)
+    const ansi = serializeSnapshot(source.snapshot(), { excludeModes: ["bracketedPaste"] })
+    expect(ansi).not.toContain("2004")
+    expect(ansi).toContain("1004")
+    const sink = mkScreen(20, 3)
+    feed(sink, ansi)
+    expect(sink.snapshot().modes.bracketedPaste).toBe(false)
+    expect(sink.snapshot().modes.focusTracking).toBe(true)
   })
 })
