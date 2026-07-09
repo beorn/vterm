@@ -1,5 +1,7 @@
 export {
   createScreen as createVtermScreen,
+  serializeSnapshot,
+  type SerializeOptions,
   type Screen as VtermScreen,
   type ScreenOptions as VtermScreenOptions,
   type ScreenSnapshot as VtermScreenSnapshot,
