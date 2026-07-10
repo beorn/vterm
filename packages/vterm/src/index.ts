@@ -16,5 +16,6 @@ export {
   type SixelImage,
   type TerminalOp,
   type ParserEvent,
+  type DirtyRegion,
 } from "./screen.ts"
 export { decodeScreenSnapshotBinary, encodeScreenSnapshotBinary } from "./snapshot-codec.ts"

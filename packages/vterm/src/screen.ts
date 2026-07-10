@@ -273,6 +273,30 @@ export type ParserEvent =
   | { kind: "osc"; code: number; data: string }
   | { kind: "esc"; final: string; intermediates?: string }
 
+/**
+ * Accumulated per-row damage since the previous {@link Screen.takeDirty} call — the PULL-plane
+ * observation surface for renderers that read on their own schedule (distinct from the push-plane
+ * {@link Screen.tapOps}/{@link Screen.tapParser}). Absolute-row indexed, consistent with
+ * {@link Screen.getRowAbsolute}.
+ *
+ * - `rows` — the changed rows as retained-relative ABSOLUTE indices (row 0 = oldest retained
+ *   scrollback line), OR the literal `"all"` when the whole visible buffer changed structurally
+ *   (resize, full clear, alt-screen switch, reset, restore). The `Set` is freshly OWNED by the
+ *   caller — the engine keeps a separate empty accumulator after the take.
+ * - `cursor` — `true` when the cursor position/visibility/shape/blink changed since the last take.
+ * - `scrolled` — number of lines that entered scrollback since the last take (a renderer shifts
+ *   its viewport by this and repaints only the rows in `rows`).
+ *
+ * Contract note on trimming: a retention trim shifts every absolute index down by the trimmed
+ * count; `rows` are valid against the buffer AT take time. Pair with {@link Screen.firstRetainedRow}
+ * (which bumps by the trimmed count) to rebase indices cached across a take that spanned a trim.
+ */
+export interface DirtyRegion {
+  rows: Set<number> | "all"
+  cursor: boolean
+  scrolled: number
+}
+
 export interface Screen {
   readonly cols: number
   readonly rows: number
@@ -310,6 +334,40 @@ export interface Screen {
   /** Scrollback rows above the visible grid, oldest first, rendered like getText(). */
   getScrollbackText(): string
   getTextRange(startRow: number, startCol: number, endRow: number, endCol: number): string
+
+  // ── Absolute-row read plane ──
+  // One coordinate over the whole buffer (scrollback + screen). Absolute row 0 = oldest RETAINED
+  // scrollback line; the screen occupies the LAST `screenRows()` rows. The existing screen-relative
+  // reads (`getCell`/`getLine`) are untouched.
+
+  /** Total rows in the buffer: retained scrollback + screen. */
+  totalRows(): number
+  /** Number of visible screen rows (the terminal's row dimension). */
+  screenRows(): number
+  /**
+   * Absolute row where the viewport's top line sits. At the bottom (no scroll):
+   * `totalRows() - screenRows()`. Scrolled fully up: `0`.
+   */
+  viewportTop(): number
+  /**
+   * The row at ABSOLUTE index `row` (row 0 = oldest retained scrollback line; the screen occupies
+   * the last `screenRows()` rows). Colors are stripped of palette-origin index like {@link getLine}.
+   * Out-of-range indices return a blank row (matching the {@link getLine} read-boundary contract).
+   */
+  getRowAbsolute(row: number): ScreenCell[]
+  /**
+   * The GLOBAL index of retained absolute row 0 — i.e. the number of scrollback lines permanently
+   * evicted by retention trimming since creation (0 initially). Increases only when trimming drops
+   * lines; resets on {@link reset}/{@link restore}. A stable global row id is
+   * `firstRetainedRow() + <absolute row>`; an increase since a prior read signals a trim.
+   */
+  firstRetainedRow(): number
+  /**
+   * Take and reset the accumulated per-row damage since the previous call — the pull-plane damage
+   * surface for renderers. See {@link DirtyRegion}. Always-on (independent of {@link tapOps}); the
+   * write path costs at most one Set membership update per row-run.
+   */
+  takeDirty(): DirtyRegion
 
   getCursorPosition(): { x: number; y: number }
   getCursorVisible(): boolean
@@ -1093,6 +1151,43 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // the sub-state transition so the completed escape's ParserEvent can carry it.
   let escIntermediate = ""
 
+  // ── Dirty tracking (pull-plane damage) ──
+  // Always-on accumulation of per-row damage between takeDirty() calls. `dirtyRows` holds
+  // retained-relative ABSOLUTE row indices (consistent with getRowAbsolute); `dirtyAll` is the
+  // structural-change sentinel (resize/clear/alt-switch/reset/restore). `dirtyScrolled` counts
+  // lines that entered scrollback since the last take. `dirtyLastAbs` collapses a run of writes
+  // to the same row into a single Set membership update (the write-path cost is one number compare
+  // plus, per row-run, one Set.add — no allocation per cell). `trimmedRowCount` is the cumulative
+  // count of scrollback lines evicted by retention trimming (the global origin of retained row 0);
+  // it survives takes and resets only on reset()/restore(). Cursor damage is derived by comparing
+  // the cursor snapshot captured at the previous take — zero write-path cost.
+  let dirtyAll = false
+  let dirtyRows = new Set<number>()
+  let dirtyScrolled = 0
+  let dirtyLastAbs = -1
+  let trimmedRowCount = 0
+  let dirtyCursor = { x: 0, y: 0, visible: true, shape: "block" as "block" | "underline" | "bar", blinking: true }
+
+  function markScreenRowDirty(screenRow: number): void {
+    if (dirtyAll) return
+    const abs = scrollback.length + screenRow
+    if (abs === dirtyLastAbs) return
+    dirtyLastAbs = abs
+    dirtyRows.add(abs)
+  }
+
+  function markScreenRowsDirty(top: number, bottom: number): void {
+    if (dirtyAll) return
+    for (let r = top; r <= bottom; r++) markScreenRowDirty(r)
+  }
+
+  /** Structural change — the whole visible buffer is damaged. Drops the per-row set. */
+  function markAllDirty(): void {
+    dirtyAll = true
+    dirtyRows.clear()
+    dirtyLastAbs = -1
+  }
+
   // Decoder for incoming bytes; encoder for string payloads passed to apply().
   const decoder = new TextDecoder()
   const encoder = new TextEncoder()
@@ -1199,16 +1294,27 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       for (let c = lm; c <= rm && c < cols; c++) {
         bottomRow[c] = EMPTY_CELL
       }
+      // Content stays on-screen (no scrollback); every row in the box changed at its position.
+      markScreenRowsDirty(top, bottom)
     } else {
       // Full-width scroll
       // Move top row to scrollback (only if main screen & top of screen)
-      if (grid === mainGrid && top === 0) {
+      const enteredScrollback = grid === mainGrid && top === 0
+      if (enteredScrollback) {
         scrollback.push(grid[0]!)
         scrollbackSoftWrapped.push(softWrapped[0] ?? false)
         if (scrollback.length > scrollbackLimit * 2) {
           const over = scrollback.length - scrollbackLimit
           scrollback.splice(0, over)
           scrollbackSoftWrapped.splice(0, over)
+          // Absolute indices shift down by `over`; rebase accumulated damage and record the trim.
+          if (!dirtyAll && dirtyRows.size > 0) {
+            const shifted = new Set<number>()
+            for (const r of dirtyRows) if (r >= over) shifted.add(r - over)
+            dirtyRows = shifted
+            dirtyLastAbs = -1
+          }
+          trimmedRowCount += over
         }
       }
       for (let i = top; i < bottom; i++) {
@@ -1217,6 +1323,16 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       }
       grid[bottom] = makeRow(cols)
       softWrapped[bottom] = false
+      if (enteredScrollback) {
+        // A line left the screen for history: the shifted rows keep their absolute index (scrollback
+        // grew by exactly the shift), so only the freshly-blanked bottom row changed content.
+        dirtyScrolled++
+        markScreenRowDirty(bottom)
+      } else {
+        // Alt-screen or scroll-region scroll: no scrollback growth, so content at each absolute
+        // screen position in the box changed.
+        markScreenRowsDirty(top, bottom)
+      }
     }
   }
 
@@ -1245,6 +1361,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       grid[top] = makeRow(cols)
       softWrapped[top] = false
     }
+    // Down-scroll never enters scrollback; content at each screen position in the box changed.
+    markScreenRowsDirty(top, bottom)
   }
 
   function scrollViewport(delta: number): void {
@@ -1254,7 +1372,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // ── Character writing ──
 
   /** Find the previous non-spacer cell (the cell before curX, skipping wide-char spacers) */
-  function getPrevCell(): { cell: ScreenCell; col: number } | null {
+  function getPrevCell(): { cell: ScreenCell; col: number; row: number } | null {
     if (curX === 0 && curY === 0) return null
     let prevCol = curX - 1
     let prevRow = curY
@@ -1271,7 +1389,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       cell = row[prevCol]!
     }
     if (cell === EMPTY_CELL) return null
-    return { cell, col: prevCol }
+    return { cell, col: prevCol, row: prevRow }
   }
 
   /** Widen a cell to 2 columns, adding a spacer cell after it */
@@ -1317,6 +1435,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         prev.cell.char += ch
         const row = grid[curY === 0 && curX === 0 ? 0 : curY]!
         widenCell(row, prev.col, prev.cell)
+        markScreenRowDirty(prev.row)
         // Advance cursor past the spacer
         curX = prev.col + 2
         if (curX >= cols) curX = cols - 1
@@ -1329,6 +1448,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       const prev = getPrevCell()
       if (prev) {
         prev.cell.char += ch
+        markScreenRowDirty(prev.row)
       }
       return
     }
@@ -1338,6 +1458,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       const prev = getPrevCell()
       if (prev) {
         prev.cell.char += ch
+        markScreenRowDirty(prev.row)
       }
       return
     }
@@ -1347,6 +1468,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       const prev = getPrevCell()
       if (prev) {
         prev.cell.char += ch
+        markScreenRowDirty(prev.row)
         afterZWJ = true
       }
       return
@@ -1358,6 +1480,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       const prev = getPrevCell()
       if (prev) {
         prev.cell.char += ch
+        markScreenRowDirty(prev.row)
         // The ZWJ sequence stays in the same wide cell
         return
       }
@@ -1452,6 +1575,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       widenCell(row, curX, cell)
     }
 
+    markScreenRowDirty(curY)
     curX += charWidth
     lastChar = ch
   }
@@ -1534,6 +1658,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             grid[row]![col] = cell
           }
         }
+        markScreenRowsDirty(t, Math.min(b, rows - 1))
       } else if (finalByte === "z" || finalByte === "{") {
         // DECERA — Erase Rectangular Area (finalByte 'z')
         // DECSERA — Selective Erase Rectangular Area (finalByte '{', treated identically in headless mode)
@@ -1543,6 +1668,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             grid[row]![col] = emptyCell()
           }
         }
+        markScreenRowsDirty(t, Math.min(b, rows - 1))
       } else if (finalByte === "v") {
         // DECCRA — Copy Rectangular Area: Pts;Pls;Pbs;Prs;Pps;Ptd;Pld;Ppd $ v
         // Source: (Pts, Pls) to (Pbs, Prs) on page Pps. Dest: top-left (Ptd, Pld) on page Ppd.
@@ -1570,6 +1696,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             grid[dr]![dc] = snapshot[row]![col]!
           }
         }
+        markScreenRowsDirty(Math.max(0, dstTop), Math.min(dstTop + h - 1, rows - 1))
       } else if (finalByte === "r" || finalByte === "t") {
         // DECCARA (r) — Change Attributes in Rectangular Area
         // DECRARA (t) — Reverse Attributes in Rectangular Area
@@ -1587,6 +1714,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             applyRectAttrs(cell, sgrParts, reverse)
           }
         }
+        markScreenRowsDirty(t, Math.min(b, rows - 1))
       }
       return
     }
@@ -2052,10 +2180,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             useAltScreen = true
             grid = altGrid
             softWrapped = altSoftWrapped
+            markAllDirty() // whole visible buffer swapped
           } else if (!set && useAltScreen) {
             useAltScreen = false
             grid = mainGrid
             softWrapped = mainSoftWrapped
+            markAllDirty()
           }
           break
         case 66: // DECNKM - Application Keypad
@@ -2087,6 +2217,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             softWrapped = altSoftWrapped
             curX = 0
             curY = 0
+            markAllDirty() // whole visible buffer swapped
           } else if (!set && useAltScreen) {
             useAltScreen = false
             grid = mainGrid
@@ -2094,6 +2225,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             curX = savedCurX
             curY = savedCurY
             clampCursor()
+            markAllDirty()
           }
           break
         case 69: // DECLRMM - Left/Right Margin Mode
@@ -2165,6 +2297,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         if (mode === 3) {
           scrollback.length = 0
         }
+        markAllDirty() // full clear (mode 3 also drops scrollback) — structural
         break
     }
   }
@@ -2196,6 +2329,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       }
       r[col] = cell
     }
+    markScreenRowDirty(row)
   }
 
   function handleInsertLines(count: number): void {
@@ -2231,6 +2365,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         }
       }
     }
+    markScreenRowDirty(curY)
   }
 
   function handleInsertChars(count: number): void {
@@ -2248,6 +2383,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         row.pop()
       }
     }
+    markScreenRowDirty(curY)
   }
 
   function handleEraseChars(count: number): void {
@@ -2278,6 +2414,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         r[col] = src <= right ? r[src]! : emptyCell()
       }
     }
+    markScreenRowsDirty(top, bottom)
   }
 
   function handleShiftRight(count: number): void {
@@ -2290,6 +2427,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         r[col] = src >= left ? r[src]! : emptyCell()
       }
     }
+    markScreenRowsDirty(top, bottom)
   }
 
   function handleInsertColumn(count: number): void {
@@ -2306,6 +2444,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         r[col] = emptyCell()
       }
     }
+    markScreenRowsDirty(top, bottom)
   }
 
   function handleDeleteColumn(count: number): void {
@@ -2321,6 +2460,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         r[col] = emptyCell()
       }
     }
+    markScreenRowsDirty(top, bottom)
   }
 
   /**
@@ -3294,6 +3434,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     mainSoftWrapped = new Array(rows).fill(false)
     altSoftWrapped = new Array(rows).fill(false)
     softWrapped = mainSoftWrapped
+    // Fresh world: scrollback wiped, so the damage epoch restarts and the trim origin returns to 0.
+    markAllDirty()
+    dirtyScrolled = 0
+    trimmedRowCount = 0
   }
 
   // ── Observation taps: emit helpers ──
@@ -3844,6 +3988,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       }
     }
     clampCursor()
+    markAllDirty() // dimensions + reflow changed the whole visible buffer
 
     // Fire the op tap once for the applied resize (no-op when untapped).
     if (opListeners.size > 0) emitOp({ type: "resize", cols: newCols, rows: newRows })
@@ -4035,6 +4180,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     hasSixel = false
     sixelImages = []
     clampCursor()
+    // Whole world replaced (incl. scrollback): restart the damage epoch and trim origin.
+    markAllDirty()
+    dirtyScrolled = 0
+    trimmedRowCount = 0
   }
 
   // ── Accessors ──
@@ -4065,6 +4214,55 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       lines.push(rowToString(row))
     }
     return lines.join("\n")
+  }
+
+  // ── Absolute-row read plane + dirty tracking ──
+
+  function totalRows(): number {
+    return scrollback.length + rows
+  }
+
+  function screenRows(): number {
+    return rows
+  }
+
+  function viewportTop(): number {
+    // viewportOffset counts rows scrolled UP from the bottom (0 = at bottom). The viewport's top
+    // absolute row is therefore scrollback.length - viewportOffset: at the bottom that is
+    // scrollback.length = totalRows - screenRows; scrolled fully up (offset = scrollback.length) it
+    // is 0.
+    return scrollback.length - viewportOffset
+  }
+
+  function getRowAbsolute(row: number): ScreenCell[] {
+    if (row < 0 || row >= scrollback.length + rows) return makeRow(cols)
+    const src = row < scrollback.length ? scrollback[row]! : grid[row - scrollback.length]!
+    return src.map(stripCellColorIndex)
+  }
+
+  function firstRetainedRow(): number {
+    return trimmedRowCount
+  }
+
+  function takeDirty(): DirtyRegion {
+    const cursorChanged =
+      curX !== dirtyCursor.x ||
+      curY !== dirtyCursor.y ||
+      curVisible !== dirtyCursor.visible ||
+      cursorShape !== dirtyCursor.shape ||
+      cursorBlinking !== dirtyCursor.blinking
+    const region: DirtyRegion = {
+      rows: dirtyAll ? "all" : dirtyRows,
+      cursor: cursorChanged,
+      scrolled: dirtyScrolled,
+    }
+    // Reset the epoch: hand the accumulated Set to the caller and start a fresh one.
+    dirtyRows = new Set()
+    dirtyAll = false
+    dirtyScrolled = 0
+    dirtyLastAbs = -1
+    dirtyCursor = { x: curX, y: curY, visible: curVisible, shape: cursorShape, blinking: cursorBlinking }
+    return region
   }
 
   function rowToString(row: ScreenCell[]): string {
@@ -4208,6 +4406,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     getText,
     getScrollbackText,
     getTextRange,
+    totalRows,
+    screenRows,
+    viewportTop,
+    getRowAbsolute,
+    firstRetainedRow,
+    takeDirty,
     getCursorPosition: () => ({ x: curX, y: curY }),
     getCursorVisible: () => curVisible,
     getCursorShape: () => cursorShape,
