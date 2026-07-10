@@ -1410,6 +1410,21 @@ describe("semantic prompts (OSC 133)", () => {
 // ═══════════════════════════════════════════════════════
 
 describe("text reflow", () => {
+  test("same-size resize is a no-op: deferred autowrap survives", () => {
+    // zsh's PROMPT_SP writes exactly `cols` cells and relies on the deferred
+    // wrap keeping the cursor on the row; an attach hello often re-sends the
+    // unchanged geometry. Reflowing here clamps the past-the-end cursor back
+    // into the row, so the next byte OVERWRITES the last cell instead of
+    // wrapping (xterm treats a same-size resize as a no-op and preserves it).
+    const screen = createVtermScreen({ cols: 10, rows: 4 })
+    screen.process(enc.encode("AAAAAAAAAA")) // fills row 0 exactly; wrap pending
+    screen.resize(10, 4)
+    screen.process(enc.encode("B"))
+    expect(screen.getCell(0, 9).char).toBe("A")
+    expect(screen.getCell(1, 0).char).toBe("B")
+    expect(screen.getCursor()).toEqual({ col: 1, row: 1 })
+  })
+
   test("text reflows when terminal widens", () => {
     const screen = createVtermScreen({ cols: 10, rows: 5 })
     screen.process(enc.encode("abcdefghij")) // fills row 0 exactly, soft-wraps

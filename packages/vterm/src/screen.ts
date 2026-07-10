@@ -4421,6 +4421,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   }
 
   function resize(newCols: number, newRows: number): void {
+    // Same-geometry resize is a no-op (xterm parity): reflowing here would
+    // clamp a past-the-end deferred-wrap cursor back into the row (so the
+    // next byte overwrites the last cell instead of wrapping) and would
+    // reset DECSTBM/margins for no dimension change.
+    if (newCols === cols && newRows === rows) return
     // Express the cursor content-relative BEFORE reflow (active buffer only):
     // its logical line index + cell offset within that line. Reflow changes
     // row identities, so an absolute (curX, curY) goes stale — the cursor
