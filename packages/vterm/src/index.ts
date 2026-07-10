@@ -15,3 +15,4 @@ export {
   type SemanticZone,
   type SixelImage,
 } from "./screen.ts"
+export { decodeScreenSnapshotBinary, encodeScreenSnapshotBinary } from "./snapshot-codec.ts"
