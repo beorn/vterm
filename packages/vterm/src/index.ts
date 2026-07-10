@@ -14,5 +14,7 @@ export {
   type UnderlineStyle,
   type SemanticZone,
   type SixelImage,
+  type TerminalOp,
+  type ParserEvent,
 } from "./screen.ts"
 export { decodeScreenSnapshotBinary, encodeScreenSnapshotBinary } from "./snapshot-codec.ts"

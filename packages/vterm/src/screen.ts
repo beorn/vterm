@@ -235,12 +235,69 @@ export interface ScreenSnapshot {
   }
 }
 
+/**
+ * A terminal write as serializable data — the coarse WRITE vocabulary, symmetric with the
+ * Hab session journal and termless `Recording`. Bytes remain the CANONICAL encoding of an
+ * `output` op (they are what the journal persists and what {@link Screen.tapOps} delivers);
+ * a `string` is a convenience input to {@link Screen.apply} that is UTF-8-encoded before it
+ * is applied. This is deliberately NOT a per-VT-action reification — fine-grained parsed
+ * actions are surfaced by {@link ParserEvent} through {@link Screen.tapParser}.
+ */
+export type TerminalOp = { type: "output"; data: Uint8Array | string } | { type: "resize"; cols: number; rows: number }
+
+/**
+ * A single parsed VT action, emitted by {@link Screen.tapParser} AFTER the engine applies it,
+ * in stream order. A minimal, stable union over what the parser dispatches:
+ *
+ * - `print`   — a run of consecutive printable graphemes, coalesced within one {@link
+ *               Screen.process}/{@link Screen.apply} flood and flushed before the next control
+ *               event (and at end-of-flood).
+ * - `execute` — a recognized C0 control byte (BEL, BS, HT, LF, VT, FF, CR); `code` is the byte.
+ * - `csi`     — a complete CSI sequence; `final` is the dispatching byte, `params` are the
+ *               `;`-separated numeric parameters (empty → `0`, matching the engine's own parse),
+ *               `prefix` is the private marker (`?`/`>`/`<`/`=`) when present, `intermediates`
+ *               are the `0x20`–`0x2f` bytes when present. (Colon sub-parameters collapse to
+ *               their leading integer — the top-level view the non-SGR dispatchers also use.)
+ * - `osc`     — a complete OSC with a numeric `code`; `data` is everything after the first `;`.
+ * - `esc`     — a complete non-CSI/OSC escape (`ESC c`/`D`/`M`/`7`/`8`/`E`/`H`/`=`/`>` and the
+ *               charset/`#` designators); `final` is the dispatching byte, `intermediates`
+ *               carries the `(`/`)`/`#` designator byte when present.
+ *
+ * DCS and APC string sequences are not (yet) surfaced. A listener MUST NOT throw — taps are
+ * fail-loud: an exception propagates out of the write call (the engine state stays consistent).
+ */
+export type ParserEvent =
+  | { kind: "print"; text: string }
+  | { kind: "execute"; code: number }
+  | { kind: "csi"; final: string; params: number[]; prefix?: string; intermediates?: string }
+  | { kind: "osc"; code: number; data: string }
+  | { kind: "esc"; final: string; intermediates?: string }
+
 export interface Screen {
   readonly cols: number
   readonly rows: number
 
   process(data: Uint8Array): void
   resize(cols: number, rows: number): void
+  /**
+   * Apply one {@link TerminalOp} — the single public write entry, symmetric with the journal.
+   * `output` routes to {@link process} (a `string` payload is UTF-8-encoded first); `resize`
+   * routes to {@link resize}. Additive over `process`/`resize`, which remain public.
+   */
+  apply(op: TerminalOp): void
+  /**
+   * Observe applied ops (opt-in). The listener fires exactly once per applied op — one per
+   * `process`/`apply`/`resize` call — with the CANONICAL payload (an `output` op always carries
+   * a `Uint8Array`). Returns an unsubscribe function. Zero overhead when no listener is
+   * registered. Enables symmetric journaling of the write stream.
+   */
+  tapOps(listener: (op: TerminalOp) => void): () => void
+  /**
+   * Observe parsed VT actions (opt-in), delivered AFTER each is applied, in stream order.
+   * Returns an unsubscribe function. Zero overhead when no listener is registered — no {@link
+   * ParserEvent} is allocated on the byte-flood path unless a listener exists.
+   */
+  tapParser(listener: (event: ParserEvent) => void): () => void
   reset(): void
   snapshot(): ScreenSnapshot
   restore(snapshot: ScreenSnapshot): void
@@ -1022,8 +1079,23 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let dcsStartCol = 0
   let apcBuf = ""
 
-  // Decoder for incoming bytes
+  // Observation taps (opt-in; zero-overhead when no listener is registered). `opListeners`
+  // observe the coarse WRITE ops (symmetric with the Hab journal); `parserListeners` observe
+  // fine-grained parsed VT actions. The Sets are never cleared by reset/RIS — observers
+  // outlive terminal state.
+  const opListeners = new Set<(op: TerminalOp) => void>()
+  const parserListeners = new Set<(event: ParserEvent) => void>()
+  // Print-run coalescing for the parser tap: consecutive printable graphemes in one process()
+  // flood surface as ONE {kind:"print"} event, flushed before any control event and at
+  // end-of-flood. Only populated while a parser listener exists.
+  let printRunParts: string[] = []
+  // Intermediate byte of an in-progress nF escape (charset "("/")", or "#"), remembered across
+  // the sub-state transition so the completed escape's ParserEvent can carry it.
+  let escIntermediate = ""
+
+  // Decoder for incoming bytes; encoder for string payloads passed to apply().
   const decoder = new TextDecoder()
+  const encoder = new TextEncoder()
   let utf8PendingBytes: number[] = []
 
   function utf8SequenceLength(lead: number): number {
@@ -3224,6 +3296,74 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     softWrapped = mainSoftWrapped
   }
 
+  // ── Observation taps: emit helpers ──
+  //
+  // Every helper is a no-op unless a parser listener is registered, so the per-byte parser
+  // path allocates nothing when the tap is unused. Control/CSI/OSC/ESC emitters flush the
+  // pending print run FIRST, so events reach listeners in exact application order. Emission is
+  // fail-loud: a throwing listener propagates, and because the print run is cleared before the
+  // event fires (and parser state is settled to "ground" before control events fire) the engine
+  // is left consistent for the next write.
+
+  function emitParserEvent(ev: ParserEvent): void {
+    for (const listener of parserListeners) listener(ev)
+  }
+
+  function flushPrintRun(): void {
+    if (printRunParts.length === 0) return
+    const text = printRunParts.join("")
+    printRunParts = []
+    emitParserEvent({ kind: "print", text })
+  }
+
+  function emitExecute(code: number): void {
+    if (parserListeners.size === 0) return
+    flushPrintRun()
+    emitParserEvent({ kind: "execute", code })
+  }
+
+  function emitCsiEvent(rawParams: string, intermediates: string, final: string): void {
+    if (parserListeners.size === 0) return
+    flushPrintRun()
+    let prefix: string | undefined
+    let body = rawParams
+    const marker = body.charCodeAt(0)
+    // Private/parameter-prefix markers: ? > < = (0x3f/0x3e/0x3c/0x3d).
+    if (marker === 0x3f || marker === 0x3e || marker === 0x3c || marker === 0x3d) {
+      prefix = body[0]
+      body = body.slice(1)
+    }
+    // Match the engine's own top-level param parse (empty segment → 0).
+    const params = body.split(";").map((s) => (s === "" ? 0 : parseInt(s, 10)))
+    const ev: ParserEvent = { kind: "csi", final, params }
+    if (prefix !== undefined) ev.prefix = prefix
+    if (intermediates !== "") ev.intermediates = intermediates
+    emitParserEvent(ev)
+  }
+
+  function emitOscEvent(osc: string): void {
+    if (parserListeners.size === 0) return
+    // Mirror handleOSC's code extraction exactly: bare (no ";") → whole string is the code.
+    const semi = osc.indexOf(";")
+    const code = semi === -1 ? parseInt(osc, 10) : parseInt(osc.slice(0, semi), 10)
+    if (Number.isNaN(code)) return // not a dispatched OSC — handleOSC ignored it too
+    flushPrintRun()
+    const data = semi === -1 ? "" : osc.slice(semi + 1)
+    emitParserEvent({ kind: "osc", code, data })
+  }
+
+  function emitEsc(final: string, intermediates: string): void {
+    if (parserListeners.size === 0) return
+    flushPrintRun()
+    const ev: ParserEvent = { kind: "esc", final }
+    if (intermediates !== "") ev.intermediates = intermediates
+    emitParserEvent(ev)
+  }
+
+  function emitOp(op: TerminalOp): void {
+    for (const listener of opListeners) listener(op)
+  }
+
   // ── Main parser ──
 
   function process(data: Uint8Array): void {
@@ -3240,12 +3380,15 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             escBuf = ""
           } else if (code === 0x07) {
             // BEL — ignore
+            emitExecute(0x07)
           } else if (code === 0x08) {
             // BS - Backspace
             if (curX > 0) curX--
+            emitExecute(0x08)
           } else if (code === 0x09) {
             // TAB — advance to next tab stop (or last column if none)
             curX = nextTabStop(curX)
+            emitExecute(0x09)
           } else if (code === 0x0a || code === 0x0b || code === 0x0c) {
             // LF, VT, FF — linefeed (hard break — clear any soft-wrap flag)
             softWrapped[curY] = false
@@ -3254,9 +3397,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
               curY = scrollBottom
               scrollUp(scrollTop, scrollBottom)
             }
+            emitExecute(code)
           } else if (code === 0x0d) {
             // CR - Carriage Return
             curX = 0
+            emitExecute(0x0d)
           } else if (code >= 0x20) {
             // Handle surrogate pairs for characters > U+FFFF
             let char = ch
@@ -3268,6 +3413,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
               }
             }
             writeChar(char)
+            // Coalesce into the pending print run (guarded — nothing allocates when untapped).
+            if (parserListeners.size > 0) printRunParts.push(char)
           }
           break
 
@@ -3288,6 +3435,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             // RIS - Reset to Initial State
             fullReset()
             parserState = "ground"
+            emitEsc("c", "")
           } else if (ch === "D") {
             // IND - Index (move cursor down, scroll if needed)
             curY++
@@ -3296,6 +3444,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
               scrollUp(scrollTop, scrollBottom)
             }
             parserState = "ground"
+            emitEsc("D", "")
           } else if (ch === "M") {
             // RI - Reverse Index (move cursor up, scroll if needed)
             curY--
@@ -3304,6 +3453,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
               scrollDown(scrollTop, scrollBottom)
             }
             parserState = "ground"
+            emitEsc("M", "")
           } else if (ch === "7") {
             // DECSC - Save Cursor + attributes + modes
             savedState = {
@@ -3320,6 +3470,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
               charsetG0,
             }
             parserState = "ground"
+            emitEsc("7", "")
           } else if (ch === "8") {
             // DECRC - Restore Cursor + attributes + modes
             curX = savedState.curX
@@ -3335,6 +3486,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             charsetG0 = savedState.charsetG0
             clampCursor()
             parserState = "ground"
+            emitEsc("8", "")
           } else if (ch === "E") {
             // NEL - Next Line
             curX = 0
@@ -3344,27 +3496,34 @@ export function createScreen(options: ScreenOptions = {}): Screen {
               scrollUp(scrollTop, scrollBottom)
             }
             parserState = "ground"
+            emitEsc("E", "")
           } else if (ch === "H") {
             // HTS — Horizontal Tab Set at current cursor column
             tabStops.add(curX)
             parserState = "ground"
+            emitEsc("H", "")
           } else if (ch === "#") {
             // ESC # <digit> — DEC screen alignment / double-width/height. We handle "8".
+            escIntermediate = "#"
             parserState = "escape_hash"
           } else if (ch === "(") {
             // Designate G0 character set
+            escIntermediate = "("
             parserState = "escape_charset"
           } else if (ch === ")") {
             // Designate G1 character set (ignored, just consume next byte)
+            escIntermediate = ")"
             parserState = "escape_charset"
           } else if (ch === "=") {
             // DECKPAM - Application Keypad Mode
             applicationKeypad = true
             parserState = "ground"
+            emitEsc("=", "")
           } else if (ch === ">") {
             // DECKPNM - Normal Keypad Mode
             applicationKeypad = false
             parserState = "ground"
+            emitEsc(">", "")
           } else if (ch === "_") {
             // APC - Application Program Command
             parserState = "apc"
@@ -3383,6 +3542,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             charsetG0 = false // B = ASCII, or any other
           }
           parserState = "ground"
+          emitEsc(ch, escIntermediate)
           break
 
         case "escape_hash":
@@ -3403,6 +3563,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           }
           // Other ESC # sequences (3/4/5/6 for double-width/height) are ignored.
           parserState = "ground"
+          emitEsc(ch, escIntermediate)
           break
 
         case "csi": {
@@ -3440,6 +3601,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
               handleCSI(paramPart, intermediatePart, ch)
             }
             parserState = "ground"
+            emitCsiEvent(paramPart, intermediatePart, ch)
           } else if (escBuf.length >= 256) {
             parserState = "ground"
           } else {
@@ -3453,6 +3615,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             // BEL terminates OSC
             handleOSC(oscBuf)
             parserState = "ground"
+            emitOscEvent(oscBuf)
           } else if (code === 0x1b) {
             // ESC might be start of ST (\x1b\\)
             parserState = "osc_st"
@@ -3463,13 +3626,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           }
           break
 
-        case "osc_st":
-          if (ch === "\\") {
-            // ST (String Terminator) — end of OSC
-            handleOSC(oscBuf)
-          }
+        case "osc_st": {
+          // ST (String Terminator) — end of OSC only when the backslash completes ESC \.
+          const oscComplete = ch === "\\"
+          if (oscComplete) handleOSC(oscBuf)
           parserState = "ground"
+          if (oscComplete) emitOscEvent(oscBuf)
           break
+        }
 
         case "dcs":
           // Accumulate DCS data until ST (ESC \) or BEL
@@ -3521,6 +3685,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           break
       }
     }
+
+    // Flush any trailing print run (coalesced within this flood), then fire the op tap once
+    // for the whole applied write. Both are no-ops when their tap has no listener.
+    flushPrintRun()
+    if (opListeners.size > 0) emitOp({ type: "output", data })
   }
 
   // ── Resize ──
@@ -3675,6 +3844,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       }
     }
     clampCursor()
+
+    // Fire the op tap once for the applied resize (no-op when untapped).
+    if (opListeners.size > 0) emitOp({ type: "resize", cols: newCols, rows: newRows })
   }
 
   // ── Snapshot / restore ──
@@ -3981,6 +4153,38 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
   }
 
+  // ── Public op seam + taps ──
+
+  function apply(op: TerminalOp): void {
+    switch (op.type) {
+      case "output":
+        process(typeof op.data === "string" ? encoder.encode(op.data) : op.data)
+        return
+      case "resize":
+        resize(op.cols, op.rows)
+        return
+      default: {
+        // Exhaustiveness + fail-loud: an unknown op type is a programming error, not a silent no-op.
+        const unreachable: never = op
+        throw new Error(`vterm.apply: unhandled op ${JSON.stringify(unreachable)}`)
+      }
+    }
+  }
+
+  function tapOps(listener: (op: TerminalOp) => void): () => void {
+    opListeners.add(listener)
+    return () => {
+      opListeners.delete(listener)
+    }
+  }
+
+  function tapParser(listener: (event: ParserEvent) => void): () => void {
+    parserListeners.add(listener)
+    return () => {
+      parserListeners.delete(listener)
+    }
+  }
+
   // Suppress unused variable warnings
   void [mouseTrackingMode, textScale, advancedClipboard]
 
@@ -3993,6 +4197,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     },
     process,
     resize,
+    apply,
+    tapOps,
+    tapParser,
     reset: fullReset,
     snapshot,
     restore,

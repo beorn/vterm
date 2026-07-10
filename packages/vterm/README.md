@@ -117,6 +117,58 @@ console.log(restored.getText()) // "Hello, Bold Green World!" — text and style
 
 `serialize(options?)` walks scrollback and the visible screen and emits a minimal SGR/mode/cursor stream that a fresh same-size terminal can replay: the pending pen at the cursor, DECAWM/insert/origin/reverse/app-cursor/app-keypad/bracketed/mouse/focus modes, margins, alt-screen, and cursor shape all survive the round trip. `SerializeOptions` toggles `includeScrollback` (default `true`), `includeTitle` (default `false`), `hyperlinks` (default `true`), and `excludeModes` (an array of mode keys to skip, leaving the receiver's fresh default for those). Two exclusions are always enforced and cannot be toggled off: synchronized-output mode (`?2026`) and DECCOLM (`?3`) are never emitted, since replaying either would wedge or wipe a real receiver. The inactive screen buffer, DECSC saved-cursor state, the color stack, and mid-parse parser state aren't representable in a VT byte stream and stay unserialized by design — use the binary `snapshot()`/`restore()` pair, or raw byte replay, when those need to cross too.
 
+### Ops and taps
+
+`apply(op)` is the single public write entry — the same seam a session journal records and replays. An op is coarse, serializable data; **bytes stay the canonical encoding** (an `output` op is just bytes, deterministically re-parsed on replay — vterm never reifies a per-VT-action op):
+
+```typescript
+type TerminalOp =
+  | { type: "output"; data: Uint8Array | string } // routes to process() — a string is UTF-8-encoded first
+  | { type: "resize"; cols: number; rows: number } // routes to resize()
+```
+
+`apply()` is additive over `process()`/`resize()`, which remain public. Two opt-in taps observe the write stream without changing it:
+
+- **`tapOps(listener): () => void`** — the listener fires **once per applied op** (one per `process`/`apply`/`resize` call), with the canonical payload (an `output` op always carries a `Uint8Array`, even when a string was passed to `apply()`). This is the journaling seam.
+- **`tapParser(listener): () => void`** — the listener fires **once per parsed VT action, AFTER the engine applies it, in stream order**. Consecutive printable graphemes coalesce into one `print` event (flushed before any control event and at end-of-flood):
+
+```typescript
+type ParserEvent =
+  | { kind: "print"; text: string }
+  | { kind: "execute"; code: number } // a C0 control byte (BEL/BS/HT/LF/VT/FF/CR)
+  | { kind: "csi"; final: string; params: number[]; prefix?: string; intermediates?: string }
+  | { kind: "osc"; code: number; data: string }
+  | { kind: "esc"; final: string; intermediates?: string }
+```
+
+Both taps return an **unsubscribe** function, and both are **zero-overhead when unused** — no event object is allocated on the byte-flood path unless a listener is registered. Taps are **fail-loud**: a listener MUST NOT throw; if it does, the exception propagates out of the write call and the engine is left in a consistent state (never wedged mid-sequence). For CSI, `params` uses the engine's own top-level parse (`;`-split, empty → `0`; colon sub-parameters collapse to their leading integer); `prefix` is the private marker (`?`/`>`/`<`/`=`) when present. DCS and APC string sequences are not surfaced as parser events.
+
+```typescript
+import { createVtermScreen, type TerminalOp, type ParserEvent } from "vterm.js"
+
+const screen = createVtermScreen({ cols: 80, rows: 24 })
+
+// Journal every write; re-applying the log onto a fresh screen reproduces the state exactly.
+const journal: TerminalOp[] = []
+const stopJournal = screen.tapOps((op) => journal.push(op))
+
+// Mirror the window title without polling for it.
+let title = ""
+const stopTitle = screen.tapParser((ev: ParserEvent) => {
+  if (ev.kind === "osc" && (ev.code === 0 || ev.code === 2)) title = ev.data
+})
+
+screen.apply({ type: "output", data: "\x1b]0;build passing\x07\x1b[1mhi\x1b[0m" })
+console.log(title) // "build passing" — set the moment the OSC was applied
+
+stopJournal()
+stopTitle()
+
+const replay = createVtermScreen({ cols: 80, rows: 24 })
+for (const op of journal) replay.apply(op)
+console.log(replay.serialize() === screen.serialize()) // true
+```
+
 ## API
 
 ### `createVtermScreen(options)`
@@ -133,6 +185,9 @@ console.log(restored.getText()) // "Hello, Bold Green World!" — text and style
 | Method                         | Description                                            |
 | ------------------------------ | ------------------------------------------------------ |
 | `process(data: Uint8Array)`    | Feed raw terminal data                                 |
+| `apply(op: TerminalOp)`        | Apply one serializable write op (`output` / `resize`)  |
+| `tapOps(listener)`             | Observe applied ops; returns unsubscribe               |
+| `tapParser(listener)`          | Observe parsed VT actions post-apply; returns unsubscribe |
 | `getText()`                    | Get all text (scrollback + screen)                     |
 | `getTextRange(sr, sc, er, ec)` | Get text in a range                                    |
 | `getLine(row)`                 | Get cells for a row                                    |
