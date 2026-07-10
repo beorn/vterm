@@ -250,6 +250,34 @@ interface ScreenCell {
 }
 ```
 
+`ScreenCell` is a **read-boundary value** — it is materialized on demand, not how the grid
+is stored. See below.
+
+### Internal representation — packed cell grid
+
+The engine stores the grid as **packed typed arrays**, not one heap object per cell. Each
+row keeps a `Uint32Array` of metadata (boolean attributes + a 3-bit underline-style enum +
+color/URL presence bits), a parallel `string[]` grapheme sidecar, and lazily-allocated
+color planes: 24-bit packed RGB in a `Uint32Array` alongside the palette-origin index in an
+`Int16Array`. Colors are therefore stored as primitives, so the byte-flood write path
+allocates **nothing per cell** — no cell object and no color object. `ScreenCell` objects
+materialize only at the read boundary (`getCell`, `getRow`, `getRowAbsolute`, `snapshot`,
+`serialize`), and `Color` identity (`{ r, g, b, index? }`) is preserved end to end: an
+indexed SGR keeps its origin `index` so `serialize()` re-emits the faithful indexed form
+rather than baking truecolor.
+
+The color planes are allocated on a row's first colored cell, so all-plain-text rows stay
+lean (`meta` + `chars` only). OSC-8 URLs (rare) live in a sparse per-row `Map`. The public
+contract is unchanged — reads, snapshots, ops/taps, and damage tracking behave identically
+to the previous heap-object grid (the full existing test suite passes unchanged).
+
+The encoding mirrors the shape of silvery's `ag-term` render buffer (packed `Uint32Array`
+metadata + separate grapheme array) without importing it — vterm stays dependency-free.
+
+**Throughput** (`bun tools/bench-packed-grid.ts`, vs the pre-packing heap-object grid):
+`~1.3×` faster on both a 200k-line scroll flood and a large in-place repaint, at `~22%`
+lower peak RSS (the write path no longer churns per-cell objects through the GC).
+
 ## Absolute rows and damage tracking
 
 Two engine-native read planes over the buffer, for renderers that address the whole
