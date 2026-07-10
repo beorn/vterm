@@ -35,7 +35,13 @@
 
 // ── Types ──────────────────────────────────────────────────────────────
 
-export interface CellColor {
+/**
+ * An RGB color, identity-preserving. `r`/`g`/`b` are always present (painters read
+ * them unconditionally); `index` is optional palette provenance. Named `Color` per the
+ * §9 naming ruling (rule 5: flat progressive shape over a discriminated union — a type
+ * named `RGB` that carries `.index` would lie). {@link CellColor} is the deprecated alias.
+ */
+export interface Color {
   r: number
   g: number
   b: number
@@ -51,12 +57,15 @@ export interface CellColor {
    * outer terminal's theme on reattach. Preserving `index` lets the serializer
    * re-emit the faithful indexed form so a themeable receiver themes it again.
    *
-   * It rides {@link ScreenSnapshot} as plain optional data (like
+   * It rides {@link Snapshot} as plain optional data (like
    * `scrollbackSoftWrapped`) and is stripped at the {@link VtermScreen.getCell} /
-   * {@link VtermScreen.getLine} read boundary, whose contract is the resolved RGB.
+   * {@link VtermScreen.getRow} read boundary, whose contract is the resolved RGB.
    */
   index?: number
 }
+
+/** @deprecated Renamed to {@link Color} (§9 naming ruling). This alias rides the migration window. */
+export type CellColor = Color
 
 export type UnderlineStyle = "none" | "single" | "double" | "curly" | "dotted" | "dashed"
 
@@ -145,7 +154,19 @@ export interface ScreenBufferSnapshot {
   softWrapped: boolean[]
 }
 
-export interface ScreenSnapshot {
+/**
+ * The whole-world persist/restore value — grids, ranges, modes, cursor, colors,
+ * parser transients, wrap bits. JSON-safe plain data; the persist boundary, not the
+ * incremental read path. Named `Snapshot` per §9 (the namespace supplies the context);
+ * {@link ScreenSnapshot} is the deprecated alias.
+ *
+ * Note: `cursor`/`savedState` still carry `x`/`y` (not `col`/`row`) — the §9
+ * `Cursor{col,row}` field rename is DEFERRED here because these fields are the wire
+ * shape read by the binary codec (`encodeScreenSnapshotBinary`); renaming them silently
+ * changes the persisted format. The {@link Cursor} read type + `getCursor()` accessor
+ * carry the col/row vocabulary at the read boundary instead.
+ */
+export interface Snapshot {
   version: 1
   cols: number
   rows: number
@@ -233,6 +254,20 @@ export interface ScreenSnapshot {
     pendingRegionalIndicator: string | null
     afterZWJ: boolean
   }
+}
+
+/** @deprecated Renamed to {@link Snapshot} (§9 naming ruling). This alias rides the migration window. */
+export type ScreenSnapshot = Snapshot
+
+/**
+ * The cursor position at the read boundary, in the grid's own `col`/`row` vocabulary
+ * (§9 naming ruling: `x`/`y` contradicted the row/col naming used everywhere else, and
+ * the `State` suffix was redundant). Returned by {@link VtermScreen.getCursor}; the legacy
+ * {@link VtermScreen.getCursorPosition} still returns the `{ x, y }` shape (deprecated).
+ */
+export interface Cursor {
+  col: number
+  row: number
 }
 
 /**
@@ -323,12 +358,18 @@ export interface Screen {
    */
   tapParser(listener: (event: ParserEvent) => void): () => void
   reset(): void
-  snapshot(): ScreenSnapshot
-  restore(snapshot: ScreenSnapshot): void
+  snapshot(): Snapshot
+  restore(snapshot: Snapshot): void
   /** Serialize the current state to minimal ANSI — `serializeSnapshot(this.snapshot(), options)`. */
   serialize(options?: SerializeOptions): string
 
   getCell(row: number, col: number): ScreenCell
+  /**
+   * The cells of a screen-relative row (§9: **row = cells, line = text**). Colors are
+   * stripped of palette-origin index at the read boundary.
+   */
+  getRow(row: number): ScreenCell[]
+  /** @deprecated Renamed to {@link getRow} (§9: row = cells, line = text). */
   getLine(row: number): ScreenCell[]
   getText(): string
   /** Scrollback rows above the visible grid, oldest first, rendered like getText(). */
@@ -369,6 +410,9 @@ export interface Screen {
    */
   takeDirty(): DirtyRegion
 
+  /** Cursor position in the grid's `col`/`row` vocabulary (§9). See {@link Cursor}. */
+  getCursor(): Cursor
+  /** @deprecated Use {@link getCursor} — returns `{ col, row }` per the §9 naming ruling. */
   getCursorPosition(): { x: number; y: number }
   getCursorVisible(): boolean
   getCursorShape(): "block" | "underline" | "bar"
@@ -4402,6 +4446,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     snapshot,
     restore,
     getCell,
+    getRow: getLine,
     getLine,
     getText,
     getScrollbackText,
@@ -4412,6 +4457,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     getRowAbsolute,
     firstRetainedRow,
     takeDirty,
+    getCursor: () => ({ col: curX, row: curY }),
     getCursorPosition: () => ({ x: curX, y: curY }),
     getCursorVisible: () => curVisible,
     getCursorShape: () => cursorShape,

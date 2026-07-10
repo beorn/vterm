@@ -1,5 +1,13 @@
 import { describe, test, expect } from "vitest"
-import { createVtermScreen, type VtermScreenSnapshot } from "../src/index.ts"
+import {
+  createVtermScreen,
+  type VtermScreenSnapshot,
+  type Snapshot,
+  type Color,
+  type Cursor,
+  type CellColor,
+  type ScreenSnapshot,
+} from "../src/index.ts"
 
 const enc = new TextEncoder()
 
@@ -9,6 +17,47 @@ function screenWith(input: string, opts?: Parameters<typeof createVtermScreen>[0
   screen.process(enc.encode(input))
   return screen
 }
+
+// ═══════════════════════════════════════════════════════
+// §9 naming ruling — canonical names + deprecated aliases
+// ═══════════════════════════════════════════════════════
+
+describe("§9 naming ruling", () => {
+  test("getRow returns cells and matches deprecated getLine", () => {
+    const screen = screenWith("\x1b[1mHi\x1b[0m")
+    const row = screen.getRow(0)
+    expect(row[0]?.char).toBe("H")
+    expect(row[0]?.bold).toBe(true)
+    expect(screen.getRow(0)).toEqual(screen.getLine(0))
+  })
+
+  test("getCursor returns {col,row}; getCursorPosition still returns {x,y}", () => {
+    const screen = screenWith("hello")
+    expect(screen.getCursor()).toEqual({ col: 5, row: 0 })
+    const legacy = screen.getCursorPosition()
+    expect({ col: legacy.x, row: legacy.y }).toEqual(screen.getCursor())
+  })
+
+  test("Color is the canonical shape; CellColor alias resolves to it", () => {
+    const screen = screenWith("\x1b[38;2;255;100;0mX\x1b[0m")
+    const c: Color | null = screen.getRow(0)[0]?.fg ?? null
+    expect(c).toEqual({ r: 255, g: 100, b: 0 })
+    // CellColor is a structural alias of Color — assignable both directions.
+    const asCell: CellColor | null = c
+    const asColor: Color | null = asCell
+    expect(asColor).toEqual(c)
+  })
+
+  test("Snapshot is canonical; ScreenSnapshot / VtermScreenSnapshot aliases interchange", () => {
+    const screen = screenWith("world")
+    const snap: Snapshot = screen.snapshot()
+    const asLegacy: ScreenSnapshot = snap
+    const asVterm: VtermScreenSnapshot = asLegacy
+    const restored = createVtermScreen({ cols: snap.cols, rows: snap.rows })
+    restored.restore(asVterm)
+    expect(restored.getText()).toBe(screen.getText())
+  })
+})
 
 // ═══════════════════════════════════════════════════════
 // Basic / existing tests

@@ -169,6 +169,19 @@ for (const op of journal) replay.apply(op)
 console.log(replay.serialize() === screen.serialize()) // true
 ```
 
+## Naming — schema migration
+
+The public vocabulary is converging on the terminal domain model (name the thing, not the mechanism; **row = cells, line = text**; flat progressive shapes over discriminated unions). The canonical names below are live now; the old names remain exported as `@deprecated` aliases through the migration window, so existing code keeps compiling.
+
+| Deprecated                       | Canonical            | Notes                                                                 |
+| -------------------------------- | -------------------- | --------------------------------------------------------------------- |
+| `CellColor`                      | `Color`              | Same shape `{ r, g, b, index? }`; a type named `RGB`/`CellColor` carrying `.index` was the smell. |
+| `ScreenSnapshot` / `VtermScreenSnapshot` | `Snapshot`   | The namespace supplies the context; `VtermScreenSnapshot` stays exported as an alias for existing consumers. |
+| `getLine(row): ScreenCell[]`     | `getRow(row)`        | Row = cells; the text readers (`getText`, `getScrollbackText`) keep "line/text". |
+| `getCursorPosition(): {x,y}`     | `getCursor(): Cursor` | `Cursor` is `{ col, row }` — the grid's own vocabulary.               |
+
+**Deferred (not renamed this slice):** the `Snapshot.cursor` / `Snapshot.savedState` fields keep `x`/`y` rather than `col`/`row`, because those field names are the wire shape read by `encodeScreenSnapshotBinary` — renaming them would silently change the persisted binary format. The `col`/`row` vocabulary is available at the read boundary via `getCursor()` / the `Cursor` type. The snapshot field rename is a codec-format concern for a coordinated schema bump.
+
 ## API
 
 ### `createVtermScreen(options)`
@@ -190,9 +203,11 @@ console.log(replay.serialize() === screen.serialize()) // true
 | `tapParser(listener)`          | Observe parsed VT actions post-apply; returns unsubscribe |
 | `getText()`                    | Get all text (scrollback + screen)                     |
 | `getTextRange(sr, sc, er, ec)` | Get text in a range                                    |
-| `getLine(row)`                 | Get cells for a row                                    |
+| `getRow(row)`                  | Get cells for a screen row (row = cells, line = text)  |
+| `getLine(row)`                 | **Deprecated** — alias of `getRow`                     |
 | `getCell(row, col)`            | Get a single cell                                      |
-| `getCursorPosition()`          | Get cursor `{ x, y }`                                  |
+| `getCursor()`                  | Get cursor `{ col, row }`                              |
+| `getCursorPosition()`          | **Deprecated** — cursor `{ x, y }`; use `getCursor()`  |
 | `getCursorVisible()`           | Check cursor visibility                                |
 | `getCursorShape()`             | Get cursor shape: `"block"`, `"underline"`, or `"bar"` |
 | `getCursorBlinking()`          | Check if cursor is blinking                            |
@@ -218,8 +233,8 @@ console.log(replay.serialize() === screen.serialize()) // true
 ```typescript
 interface ScreenCell {
   char: string
-  fg: CellColor | null // { r, g, b }
-  bg: CellColor | null
+  fg: Color | null // { r, g, b, index? }
+  bg: Color | null
   bold: boolean
   faint: boolean
   italic: boolean
