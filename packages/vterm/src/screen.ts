@@ -480,6 +480,301 @@ function stripCellColorIndex(cell: ScreenCell): ScreenCell {
   }
 }
 
+// ── Packed cell grid ────────────────────────────────────────────────────
+//
+// The engine's INTERNAL grid is packed typed arrays, not per-cell heap objects.
+// Each row is a {@link PackedRow}: one `Uint32` metadata word per column (boolean
+// attributes + a 3-bit underline-style enum + color/url presence bits), a parallel
+// `string[]` grapheme sidecar, and per-row sparse `Map`s holding the resolved,
+// identity-preserving colors ({@link CellColor} `{ r, g, b, index? }`) and the OSC-8
+// URL. `ScreenCell` heap objects materialize ONLY at the read boundary — the
+// terminal-flow perf ruling: per-cell heap objects are the proven 3-5x flood cost.
+//
+// The encoding mirrors silvery's ag-term render buffer ("packed Uint32Array for cell
+// metadata … separate string array for graphemes") — same underline-style enum order
+// and attribute-bit philosophy — WITHOUT importing it (vterm stays dependency-free;
+// compatible shapes over shared code). It diverges deliberately in colors: silvery
+// packs 8-bit palette indices with a true-color side map, but vterm resolves every
+// indexed SGR to RGB at parse time and preserves the origin `index`, so vterm stores
+// whole {@link CellColor} objects in the maps — lossless identity, never an 8-bit slot.
+
+// Boolean attribute bits (0-8) + underline style (9-11) + presence bits (12-15).
+const F_BOLD = 1 << 0
+const F_FAINT = 1 << 1
+const F_ITALIC = 1 << 2
+const F_OVERLINE = 1 << 3
+const F_STRIKE = 1 << 4
+const F_INVERSE = 1 << 5
+const F_HIDDEN = 1 << 6
+const F_BLINK = 1 << 7
+const F_WIDE = 1 << 8
+const UL_SHIFT = 9
+const UL_MASK = 0x7 << UL_SHIFT
+const F_HAS_FG = 1 << 12
+const F_HAS_BG = 1 << 13
+const F_HAS_UL = 1 << 14
+const F_HAS_URL = 1 << 15
+
+// Underline-style enum, same order as silvery's 3-bit field: 0=none … 5=dashed.
+const UL_STYLES: readonly UnderlineStyle[] = ["none", "single", "double", "curly", "dotted", "dashed"]
+
+function underlineToBits(u: UnderlineStyle): number {
+  const i = UL_STYLES.indexOf(u)
+  return (i < 0 ? 0 : i) << UL_SHIFT
+}
+
+function bitsToUnderline(meta: number): UnderlineStyle {
+  return UL_STYLES[(meta & UL_MASK) >> UL_SHIFT] ?? "none"
+}
+
+/** Copy a color preserving its palette-origin `index` (identity), or null through. */
+function copyColor(c: CellColor | null): CellColor | null {
+  if (c === null) return null
+  return c.index === undefined ? { r: c.r, g: c.g, b: c.b } : { r: c.r, g: c.g, b: c.b, index: c.index }
+}
+
+/**
+ * One row of packed cells. Rows are objects, so the engine's row-reference idioms —
+ * scroll shifts, scrollback push, alt-buffer swap — stay pointer swaps. The per-CELL
+ * store is `meta` (Uint32 flags/underline/presence) + `chars` (grapheme sidecar) +
+ * lazily-allocated typed color arrays. Colors live as PRIMITIVES — 24-bit packed RGB
+ * in a `Uint32Array` plus the palette-origin index in a parallel `Int16Array` (-1 =
+ * no index) — so the flood write path allocates NOTHING: no per-cell heap object and
+ * no per-cell color object. Color objects materialize only at the read boundary. The
+ * color arrays are allocated on first colored write in a row, so all-plain-text rows
+ * stay lean (`meta` + `chars` only). OSC-8 URLs (rare) stay a sparse `Map`.
+ */
+interface PackedRow {
+  readonly length: number
+  /** Pack a cell straight from the current drawing attrs — the alloc-free hot path. */
+  writeFromAttrs(col: number, ch: string, a: Attrs, wide: boolean): void
+  /** Pack a full {@link ScreenCell} (cold paths: reflow, rect ops, restore). */
+  setCellRaw(col: number, cell: ScreenCell): void
+  /** Reset a column to the default-empty cell. */
+  setEmpty(col: number): void
+  /** Erase a column to blank, keeping the current background (BCE). */
+  eraseWithBg(col: number, bg: CellColor | null): void
+  /** Mark a column wide and blank its trailing spacer (col+1). */
+  widen(col: number): void
+  /** Append a grapheme to a column's char (combining marks / ZWJ / VS16). */
+  appendChar(col: number, ch: string): void
+  /** Copy one cell from another row (margin-scoped scroll / column shift). */
+  copyCellFrom(col: number, src: PackedRow, srcCol: number): void
+  /** Materialize one cell (raw — palette-origin index preserved). */
+  getCellRaw(col: number): ScreenCell
+  /** Materialize the whole row (raw). */
+  toCells(): ScreenCell[]
+  /** Repack the whole row from a `length`-long cell array (splice/edit escape hatch). */
+  replaceAllFromCells(cells: ScreenCell[]): void
+  isEmpty(col: number): boolean
+  getChar(col: number): string
+  isWide(col: number): boolean
+}
+
+/** Pack a color's 8-bit channels into a 24-bit `0xRRGGBB` word. */
+function packRgb(c: CellColor): number {
+  return (((c.r & 0xff) << 16) | ((c.g & 0xff) << 8) | (c.b & 0xff)) >>> 0
+}
+
+/** Materialize a {@link CellColor} from a packed RGB word + index (`-1` = no index). */
+function unpackColor(rgb: number, idx: number): CellColor {
+  const r = (rgb >> 16) & 0xff
+  const g = (rgb >> 8) & 0xff
+  const b = rgb & 0xff
+  return idx >= 0 ? { r, g, b, index: idx } : { r, g, b }
+}
+
+function makePackedRow(width: number): PackedRow {
+  const meta = new Uint32Array(width)
+  const chars: string[] = new Array<string>(width).fill("")
+  // Lazily-allocated color planes (null until the row's first colored cell). Each pairs
+  // a 24-bit RGB `Uint32Array` with an `Int16Array` of palette-origin indices (-1 = none).
+  let fgRgb: Uint32Array | null = null
+  let fgIdx: Int16Array | null = null
+  let bgRgb: Uint32Array | null = null
+  let bgIdx: Int16Array | null = null
+  let ulRgb: Uint32Array | null = null
+  let ulIdx: Int16Array | null = null
+  let urlMap: Map<number, string> | null = null
+
+  function setFg(col: number, c: CellColor): void {
+    if (fgRgb === null) {
+      fgRgb = new Uint32Array(width)
+      fgIdx = new Int16Array(width)
+    }
+    fgRgb[col] = packRgb(c)
+    fgIdx![col] = c.index ?? -1
+  }
+  function setBg(col: number, c: CellColor): void {
+    if (bgRgb === null) {
+      bgRgb = new Uint32Array(width)
+      bgIdx = new Int16Array(width)
+    }
+    bgRgb[col] = packRgb(c)
+    bgIdx![col] = c.index ?? -1
+  }
+  function setUl(col: number, c: CellColor): void {
+    if (ulRgb === null) {
+      ulRgb = new Uint32Array(width)
+      ulIdx = new Int16Array(width)
+    }
+    ulRgb[col] = packRgb(c)
+    ulIdx![col] = c.index ?? -1
+  }
+  function setUrl(col: number, u: string): void {
+    ;(urlMap ??= new Map<number, string>()).set(col, u)
+  }
+  function clearUrl(col: number): void {
+    if (urlMap !== null && urlMap.size > 0) urlMap.delete(col)
+  }
+
+  // Pack the flags/underline/wide bits shared by writeFromAttrs and setCellRaw.
+  function packFlags(a: Attrs | ScreenCell, wide: boolean): number {
+    let m = 0
+    if (a.bold) m |= F_BOLD
+    if (a.faint) m |= F_FAINT
+    if (a.italic) m |= F_ITALIC
+    if (a.overline) m |= F_OVERLINE
+    if (a.strikethrough) m |= F_STRIKE
+    if (a.inverse) m |= F_INVERSE
+    if (a.hidden) m |= F_HIDDEN
+    if (a.blink) m |= F_BLINK
+    if (wide) m |= F_WIDE
+    return m | underlineToBits(a.underline)
+  }
+
+  const row: PackedRow = {
+    length: width,
+
+    writeFromAttrs(col, ch, a, wide) {
+      let m = packFlags(a, wide)
+      chars[col] = ch
+      if (a.fg) {
+        setFg(col, a.fg)
+        m |= F_HAS_FG
+      }
+      if (a.bg) {
+        setBg(col, a.bg)
+        m |= F_HAS_BG
+      }
+      if (a.underlineColor) {
+        setUl(col, a.underlineColor)
+        m |= F_HAS_UL
+      }
+      if (a.url !== null) {
+        setUrl(col, a.url)
+        m |= F_HAS_URL
+      } else clearUrl(col)
+      meta[col] = m
+    },
+
+    setCellRaw(col, cell) {
+      let m = packFlags(cell, cell.wide)
+      chars[col] = cell.char
+      if (cell.fg) {
+        setFg(col, cell.fg)
+        m |= F_HAS_FG
+      }
+      if (cell.bg) {
+        setBg(col, cell.bg)
+        m |= F_HAS_BG
+      }
+      if (cell.underlineColor) {
+        setUl(col, cell.underlineColor)
+        m |= F_HAS_UL
+      }
+      if (cell.url !== null) {
+        setUrl(col, cell.url)
+        m |= F_HAS_URL
+      } else clearUrl(col)
+      meta[col] = m
+    },
+
+    setEmpty(col) {
+      meta[col] = 0
+      chars[col] = ""
+      clearUrl(col)
+    },
+
+    eraseWithBg(col, bg) {
+      chars[col] = ""
+      clearUrl(col)
+      if (bg) {
+        setBg(col, bg)
+        meta[col] = F_HAS_BG
+      } else {
+        meta[col] = 0
+      }
+    },
+
+    widen(col) {
+      meta[col] = (meta[col]! | F_WIDE) >>> 0
+      if (col + 1 < width) row.setEmpty(col + 1)
+    },
+
+    appendChar(col, ch) {
+      chars[col] = chars[col]! + ch
+    },
+
+    copyCellFrom(col, src, srcCol) {
+      // Cold path (margin scroll / column shift) — materialize + repack is fine here.
+      row.setCellRaw(col, src.getCellRaw(srcCol))
+    },
+
+    getCellRaw(col) {
+      const m = meta[col]!
+      if (m === 0 && chars[col] === "") return emptyCell()
+      return {
+        char: chars[col]!,
+        fg: m & F_HAS_FG ? unpackColor(fgRgb![col]!, fgIdx![col]!) : null,
+        bg: m & F_HAS_BG ? unpackColor(bgRgb![col]!, bgIdx![col]!) : null,
+        bold: (m & F_BOLD) !== 0,
+        faint: (m & F_FAINT) !== 0,
+        italic: (m & F_ITALIC) !== 0,
+        underline: bitsToUnderline(m),
+        underlineColor: m & F_HAS_UL ? unpackColor(ulRgb![col]!, ulIdx![col]!) : null,
+        overline: (m & F_OVERLINE) !== 0,
+        strikethrough: (m & F_STRIKE) !== 0,
+        inverse: (m & F_INVERSE) !== 0,
+        hidden: (m & F_HIDDEN) !== 0,
+        blink: (m & F_BLINK) !== 0,
+        wide: (m & F_WIDE) !== 0,
+        url: m & F_HAS_URL ? (urlMap!.get(col) ?? null) : null,
+      }
+    },
+
+    toCells() {
+      const out: ScreenCell[] = new Array(width)
+      for (let c = 0; c < width; c++) out[c] = row.getCellRaw(c)
+      return out
+    },
+
+    replaceAllFromCells(cells) {
+      for (let c = 0; c < width; c++) row.setCellRaw(c, cells[c] ?? EMPTY_CELL)
+    },
+
+    isEmpty(col) {
+      return meta[col] === 0 && chars[col] === ""
+    },
+
+    getChar(col) {
+      return chars[col]!
+    },
+
+    isWide(col) {
+      return (meta[col]! & F_WIDE) !== 0
+    },
+  }
+  return row
+}
+
+/** Build a packed row from a materialized cell array (reflow / restore output). */
+function packedRowFromCells(cells: readonly ScreenCell[], width: number): PackedRow {
+  const r = makePackedRow(width)
+  for (let c = 0; c < width; c++) r.setCellRaw(c, cells[c] ?? EMPTY_CELL)
+  return r
+}
+
 // ── ANSI 256-color palette ─────────────────────────────────────────────
 
 const ANSI_16: readonly CellColor[] = [
@@ -698,11 +993,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let scrollbackLimit = options.scrollbackLimit ?? 1000
   const onResponse = options.onResponse
 
-  // Main and alternate screen buffers
-  let mainGrid: ScreenCell[][] = makeGrid(cols, rows)
-  let altGrid: ScreenCell[][] = makeGrid(cols, rows)
+  // Main and alternate screen buffers (packed rows; see makePackedRow).
+  let mainGrid: PackedRow[] = makeGrid(cols, rows)
+  let altGrid: PackedRow[] = makeGrid(cols, rows)
   let grid = mainGrid
-  let scrollback: ScreenCell[][] = []
+  let scrollback: PackedRow[] = []
 
   // Cursor
   let curX = 0
@@ -887,23 +1182,24 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     return isDefaultEmptyCell(cell) ? EMPTY_CELL : cell
   }
 
-  function cloneGridSnapshot(source: ScreenCell[][]): ScreenCell[][] {
-    return source.map((row) => row.map(cloneCellSnapshot))
+  /** Materialize a packed grid to plain, deep-cloned Snapshot cells (index preserved). */
+  function cloneGridSnapshot(source: PackedRow[]): ScreenCell[][] {
+    return source.map((row) => row.toCells().map(cloneCellSnapshot))
   }
 
-  function restoreGridSnapshot(source: ScreenCell[][], expectedRows: number, expectedCols: number): ScreenCell[][] {
-    const out: ScreenCell[][] = []
+  function restoreGridSnapshot(source: ScreenCell[][], expectedRows: number, expectedCols: number): PackedRow[] {
+    const out: PackedRow[] = []
     for (let row = 0; row < expectedRows; row++) {
       const srcRow = source[row] ?? []
-      const dstRow = srcRow.slice(0, expectedCols).map(restoreCellSnapshot)
-      while (dstRow.length < expectedCols) dstRow.push(EMPTY_CELL)
-      out.push(dstRow)
+      const cells = srcRow.slice(0, expectedCols).map(restoreCellSnapshot)
+      while (cells.length < expectedCols) cells.push(EMPTY_CELL)
+      out.push(packedRowFromCells(cells, expectedCols))
     }
     return out
   }
 
-  function restoreScrollbackSnapshot(source: ScreenCell[][]): ScreenCell[][] {
-    return source.map((row) => row.map(restoreCellSnapshot))
+  function restoreScrollbackSnapshot(source: ScreenCell[][]): PackedRow[] {
+    return source.map((row) => packedRowFromCells(row.map(restoreCellSnapshot), row.length))
   }
 
   function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1278,20 +1574,29 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   // ── Grid helpers ──
 
-  function makeGrid(c: number, r: number): ScreenCell[][] {
-    const g: ScreenCell[][] = []
+  function makeGrid(c: number, r: number): PackedRow[] {
+    const g: PackedRow[] = []
     for (let row = 0; row < r; row++) {
       g.push(makeRow(c))
     }
     return g
   }
 
-  function makeRow(c: number): ScreenCell[] {
-    const row: ScreenCell[] = []
-    for (let col = 0; col < c; col++) {
-      row.push(EMPTY_CELL)
-    }
-    return row
+  function makeRow(c: number): PackedRow {
+    return makePackedRow(c)
+  }
+
+  /**
+   * Edit-path escape hatch for the rare column-splice operations (insert/delete
+   * chars & columns, rect fill/copy/attr): materialize the row to a fixed-length
+   * cell array, run the ordinary array edit, then repack. Length-preserving edits
+   * (splice+push/pop pairs) keep the row exactly `cols` wide. Not the hot path —
+   * plain printing goes straight through {@link PackedRow.writeFromAttrs}.
+   */
+  function mutateRowAsCells(row: PackedRow, fn: (cells: ScreenCell[]) => void): void {
+    const cells = row.toCells()
+    fn(cells)
+    row.replaceAllFromCells(cells)
   }
 
   function resetAttrs(): Attrs {
@@ -1330,13 +1635,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         const srcRow = grid[r + 1]!
         const dstRow = grid[r]!
         for (let c = lm; c <= rm && c < cols; c++) {
-          dstRow[c] = srcRow[c]!
+          dstRow.copyCellFrom(c, srcRow, c)
         }
       }
       // Clear the bottom row within margins
       const bottomRow = grid[bottom]!
       for (let c = lm; c <= rm && c < cols; c++) {
-        bottomRow[c] = EMPTY_CELL
+        bottomRow.setEmpty(c)
       }
       // Content stays on-screen (no scrollback); every row in the box changed at its position.
       markScreenRowsDirty(top, bottom)
@@ -1389,13 +1694,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         const srcRow = grid[r - 1]!
         const dstRow = grid[r]!
         for (let c = lm; c <= rm && c < cols; c++) {
-          dstRow[c] = srcRow[c]!
+          dstRow.copyCellFrom(c, srcRow, c)
         }
       }
       // Clear the top row within margins
       const topRow = grid[top]!
       for (let c = lm; c <= rm && c < cols; c++) {
-        topRow[c] = EMPTY_CELL
+        topRow.setEmpty(c)
       }
     } else {
       for (let i = bottom; i > top; i--) {
@@ -1415,8 +1720,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   // ── Character writing ──
 
-  /** Find the previous non-spacer cell (the cell before curX, skipping wide-char spacers) */
-  function getPrevCell(): { cell: ScreenCell; col: number; row: number } | null {
+  /**
+   * Locate the previous non-spacer cell position (before curX, skipping a wide-char
+   * spacer). Returns the packed row and column so callers mutate through the row's API
+   * (combining marks append, VS-16 widens). The spacer is detected structurally — a
+   * blank char whose left neighbour is wide — rather than by object identity.
+   */
+  function getPrevCell(): { row: PackedRow; col: number; rowIdx: number } | null {
     if (curX === 0 && curY === 0) return null
     let prevCol = curX - 1
     let prevRow = curY
@@ -1426,41 +1736,17 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       prevCol = cols - 1
     }
     const row = grid[prevRow]!
-    let cell = row[prevCol]!
-    // If we landed on a spacer (empty char after a wide character), go back one more
-    if (cell !== EMPTY_CELL && cell.char === "" && prevCol > 0) {
+    // If we landed on the trailing half of a wide character, step back to the wide cell.
+    if (prevCol > 0 && row.getChar(prevCol) === "" && row.isWide(prevCol - 1)) {
       prevCol--
-      cell = row[prevCol]!
     }
-    if (cell === EMPTY_CELL) return null
-    return { cell, col: prevCol, row: prevRow }
+    if (row.isEmpty(prevCol)) return null
+    return { row, col: prevCol, rowIdx: prevRow }
   }
 
-  /** Widen a cell to 2 columns, adding a spacer cell after it */
-  function widenCell(row: ScreenCell[], col: number, cell: ScreenCell): void {
-    cell.wide = true
-    if (col + 1 < cols) {
-      let spacer = row[col + 1]!
-      if (spacer === EMPTY_CELL) {
-        spacer = { ...EMPTY_CELL }
-        row[col + 1] = spacer
-      }
-      spacer.char = ""
-      spacer.fg = null
-      spacer.bg = null
-      spacer.bold = false
-      spacer.faint = false
-      spacer.italic = false
-      spacer.underline = "none"
-      spacer.underlineColor = null
-      spacer.overline = false
-      spacer.strikethrough = false
-      spacer.inverse = false
-      spacer.hidden = false
-      spacer.blink = false
-      spacer.wide = false
-      spacer.url = null
-    }
+  /** Widen the cell at `col` to 2 columns, blanking the trailing spacer at col+1. */
+  function widenCell(row: PackedRow, col: number): void {
+    row.widen(col)
   }
 
   function writeChar(ch: string): void {
@@ -1475,11 +1761,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     // ── VS-16 (U+FE0F): widen previous character to emoji presentation ──
     if (isVS16(codePoint)) {
       const prev = getPrevCell()
-      if (prev && !prev.cell.wide) {
-        prev.cell.char += ch
-        const row = grid[curY === 0 && curX === 0 ? 0 : curY]!
-        widenCell(row, prev.col, prev.cell)
-        markScreenRowDirty(prev.row)
+      if (prev && !prev.row.isWide(prev.col)) {
+        prev.row.appendChar(prev.col, ch)
+        widenCell(prev.row, prev.col)
+        markScreenRowDirty(prev.rowIdx)
         // Advance cursor past the spacer
         curX = prev.col + 2
         if (curX >= cols) curX = cols - 1
@@ -1491,8 +1776,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     if (isCombining(codePoint) && !isVS16(codePoint)) {
       const prev = getPrevCell()
       if (prev) {
-        prev.cell.char += ch
-        markScreenRowDirty(prev.row)
+        prev.row.appendChar(prev.col, ch)
+        markScreenRowDirty(prev.rowIdx)
       }
       return
     }
@@ -1501,8 +1786,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     if (isEmojiModifier(codePoint)) {
       const prev = getPrevCell()
       if (prev) {
-        prev.cell.char += ch
-        markScreenRowDirty(prev.row)
+        prev.row.appendChar(prev.col, ch)
+        markScreenRowDirty(prev.rowIdx)
       }
       return
     }
@@ -1511,8 +1796,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     if (isZWJ(codePoint)) {
       const prev = getPrevCell()
       if (prev) {
-        prev.cell.char += ch
-        markScreenRowDirty(prev.row)
+        prev.row.appendChar(prev.col, ch)
+        markScreenRowDirty(prev.rowIdx)
         afterZWJ = true
       }
       return
@@ -1523,8 +1808,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       afterZWJ = false
       const prev = getPrevCell()
       if (prev) {
-        prev.cell.char += ch
-        markScreenRowDirty(prev.row)
+        prev.row.appendChar(prev.col, ch)
+        markScreenRowDirty(prev.rowIdx)
         // The ZWJ sequence stays in the same wide cell
         return
       }
@@ -1583,40 +1868,23 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
     // Insert mode: shift existing characters right before writing
     if (insertMode) {
-      const row = grid[curY]!
       const insertEnd = leftRightMarginMode ? rightMargin + 1 : cols
-      for (let i = 0; i < charWidth; i++) {
-        // Shift cells right within margin, dropping the cell at the right edge
-        row.splice(insertEnd - 1, 1)
-        row.splice(curX, 0, EMPTY_CELL)
-      }
+      mutateRowAsCells(grid[curY]!, (cells) => {
+        for (let i = 0; i < charWidth; i++) {
+          // Shift cells right within margin, dropping the cell at the right edge
+          cells.splice(insertEnd - 1, 1)
+          cells.splice(curX, 0, emptyCell())
+        }
+      })
     }
 
-    // Copy-on-write: if cell is the shared EMPTY_CELL sentinel, create a fresh object
+    // Pack the printed cell straight from the current drawing attrs — no ScreenCell
+    // heap object is allocated on the flood path (the packed-grid perf win).
     const row = grid[curY]!
-    let cell = row[curX]!
-    if (cell === EMPTY_CELL) {
-      cell = { ...EMPTY_CELL }
-      row[curX] = cell
-    }
-    cell.char = ch
-    cell.fg = attrs.fg ? { ...attrs.fg } : null
-    cell.bg = attrs.bg ? { ...attrs.bg } : null
-    cell.bold = attrs.bold
-    cell.faint = attrs.faint
-    cell.italic = attrs.italic
-    cell.underline = attrs.underline
-    cell.underlineColor = attrs.underlineColor ? { ...attrs.underlineColor } : null
-    cell.overline = attrs.overline
-    cell.strikethrough = attrs.strikethrough
-    cell.inverse = attrs.inverse
-    cell.hidden = attrs.hidden
-    cell.blink = attrs.blink
-    cell.wide = wide
-    cell.url = attrs.url
+    row.writeFromAttrs(curX, ch, attrs, wide)
 
     if (wide) {
-      widenCell(row, curX, cell)
+      widenCell(row, curX)
     }
 
     markScreenRowDirty(curY)
@@ -1695,11 +1963,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         const charCode = parts[0] ?? 32
         if (charCode < 32 || charCode > 126) return
         const { t, l, b, r } = normalizeRect(parts[1] ?? 1, parts[2] ?? 1, parts[3] ?? rows, parts[4] ?? cols)
+        const fillChar = String.fromCharCode(charCode)
         for (let row = t; row <= b && row < rows; row++) {
+          const gr = grid[row]!
           for (let col = l; col <= r && col < cols; col++) {
             const cell = emptyCell()
-            cell.char = String.fromCharCode(charCode)
-            grid[row]![col] = cell
+            cell.char = fillChar
+            gr.setCellRaw(col, cell)
           }
         }
         markScreenRowsDirty(t, Math.min(b, rows - 1))
@@ -1708,8 +1978,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         // DECSERA — Selective Erase Rectangular Area (finalByte '{', treated identically in headless mode)
         const { t, l, b, r } = normalizeRect(parts[0] ?? 1, parts[1] ?? 1, parts[2] ?? rows, parts[3] ?? cols)
         for (let row = t; row <= b && row < rows; row++) {
+          const gr = grid[row]!
           for (let col = l; col <= r && col < cols; col++) {
-            grid[row]![col] = emptyCell()
+            gr.setEmpty(col)
           }
         }
         markScreenRowsDirty(t, Math.min(b, rows - 1))
@@ -1721,23 +1992,24 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         const dstLeft = Math.max(1, parts[6] ?? 1) - 1
         const h = src.b - src.t + 1
         const w = src.r - src.l + 1
-        // Copy via a snapshot so overlap doesn't clobber source mid-copy.
+        // Copy via a materialized snapshot so overlap doesn't clobber source mid-copy.
         const snapshot: ScreenCell[][] = []
         for (let row = 0; row < h; row++) {
+          const srcRow = grid[src.t + row]
           const line: ScreenCell[] = []
           for (let col = 0; col < w; col++) {
-            const srcCell = grid[src.t + row]?.[src.l + col] ?? EMPTY_CELL
-            line.push(srcCell === EMPTY_CELL ? EMPTY_CELL : { ...srcCell })
+            line.push(srcRow ? srcRow.getCellRaw(src.l + col) : emptyCell())
           }
           snapshot.push(line)
         }
         for (let row = 0; row < h; row++) {
           const dr = dstTop + row
           if (dr < 0 || dr >= rows) continue
+          const dstRow = grid[dr]!
           for (let col = 0; col < w; col++) {
             const dc = dstLeft + col
             if (dc < 0 || dc >= cols) continue
-            grid[dr]![dc] = snapshot[row]![col]!
+            dstRow.setCellRaw(dc, snapshot[row]![col]!)
           }
         }
         markScreenRowsDirty(Math.max(0, dstTop), Math.min(dstTop + h - 1, rows - 1))
@@ -1749,13 +2021,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         const sgrParts = parts.slice(4)
         const reverse = finalByte === "t"
         for (let row = t; row <= b && row < rows; row++) {
+          const gr = grid[row]!
           for (let col = l; col <= r && col < cols; col++) {
-            let cell = grid[row]![col]!
-            if (cell === EMPTY_CELL) {
-              cell = { ...EMPTY_CELL }
-              grid[row]![col] = cell
-            }
+            const cell = gr.getCellRaw(col)
             applyRectAttrs(cell, sgrParts, reverse)
+            gr.setCellRaw(col, cell)
           }
         }
         markScreenRowsDirty(t, Math.min(b, rows - 1))
@@ -1779,10 +2049,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         const r = Math.min(rArg, cols) - 1
         let sum = 0
         for (let row = t; row <= b && row < rows; row++) {
+          const gr = grid[row]
+          if (!gr) continue
           for (let col = l; col <= r && col < cols; col++) {
-            const cell = grid[row]?.[col]
-            if (cell?.char) {
-              const cp = cell.char.codePointAt(0) ?? 0
+            const ch = gr.getChar(col)
+            if (ch) {
+              const cp = ch.codePointAt(0) ?? 0
               sum = (sum + cp) & 0xffff
             }
           }
@@ -2366,12 +2638,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     const r = grid[row]
     if (!r) return
     for (let col = startCol; col <= endCol && col < cols; col++) {
-      const cell = emptyCell()
-      // Fill erased cells with the current background color
-      if (attrs.bg) {
-        cell.bg = { ...attrs.bg }
-      }
-      r[col] = cell
+      // Fill erased cells with the current background color (BCE).
+      r.eraseWithBg(col, attrs.bg)
     }
     markScreenRowDirty(row)
   }
@@ -2393,40 +2661,44 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   function handleDeleteChars(count: number): void {
     const row = grid[curY]
     if (!row) return
-    if (leftRightMarginMode && (leftMargin > 0 || rightMargin < cols - 1)) {
-      // Delete within margin bounds: shift left, insert blanks at right margin
-      for (let i = 0; i < count; i++) {
-        if (curX <= rightMargin) {
-          row.splice(curX, 1)
-          row.splice(rightMargin, 0, emptyCell())
+    mutateRowAsCells(row, (cells) => {
+      if (leftRightMarginMode && (leftMargin > 0 || rightMargin < cols - 1)) {
+        // Delete within margin bounds: shift left, insert blanks at right margin
+        for (let i = 0; i < count; i++) {
+          if (curX <= rightMargin) {
+            cells.splice(curX, 1)
+            cells.splice(rightMargin, 0, emptyCell())
+          }
+        }
+      } else {
+        for (let i = 0; i < count; i++) {
+          if (curX < cols) {
+            cells.splice(curX, 1)
+            cells.push(emptyCell())
+          }
         }
       }
-    } else {
-      for (let i = 0; i < count; i++) {
-        if (curX < cols) {
-          row.splice(curX, 1)
-          row.push(emptyCell())
-        }
-      }
-    }
+    })
     markScreenRowDirty(curY)
   }
 
   function handleInsertChars(count: number): void {
     const row = grid[curY]
     if (!row) return
-    if (leftRightMarginMode && (leftMargin > 0 || rightMargin < cols - 1)) {
-      // Insert within margin bounds: shift right, drop chars at right margin
-      for (let i = 0; i < count; i++) {
-        row.splice(rightMargin, 1)
-        row.splice(curX, 0, emptyCell())
+    mutateRowAsCells(row, (cells) => {
+      if (leftRightMarginMode && (leftMargin > 0 || rightMargin < cols - 1)) {
+        // Insert within margin bounds: shift right, drop chars at right margin
+        for (let i = 0; i < count; i++) {
+          cells.splice(rightMargin, 1)
+          cells.splice(curX, 0, emptyCell())
+        }
+      } else {
+        for (let i = 0; i < count; i++) {
+          cells.splice(curX, 0, emptyCell())
+          cells.pop()
+        }
       }
-    } else {
-      for (let i = 0; i < count; i++) {
-        row.splice(curX, 0, emptyCell())
-        row.pop()
-      }
-    }
+    })
     markScreenRowDirty(curY)
   }
 
@@ -2455,7 +2727,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       if (!r) continue
       for (let col = left; col <= right; col++) {
         const src = col + count
-        r[col] = src <= right ? r[src]! : emptyCell()
+        if (src <= right) r.copyCellFrom(col, r, src)
+        else r.setEmpty(col)
       }
     }
     markScreenRowsDirty(top, bottom)
@@ -2468,7 +2741,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       if (!r) continue
       for (let col = right; col >= left; col--) {
         const src = col - count
-        r[col] = src >= left ? r[src]! : emptyCell()
+        if (src >= left) r.copyCellFrom(col, r, src)
+        else r.setEmpty(col)
       }
     }
     markScreenRowsDirty(top, bottom)
@@ -2482,10 +2756,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       if (!r) continue
       // Shift cells right starting from curX, inserting blanks at curX
       for (let col = right; col >= curX + count; col--) {
-        r[col] = r[col - count]!
+        r.copyCellFrom(col, r, col - count)
       }
       for (let col = curX; col < curX + count && col <= right; col++) {
-        r[col] = emptyCell()
+        r.setEmpty(col)
       }
     }
     markScreenRowsDirty(top, bottom)
@@ -2498,10 +2772,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       const r = grid[row]
       if (!r) continue
       for (let col = curX; col + count <= right; col++) {
-        r[col] = r[col + count]!
+        r.copyCellFrom(col, r, col + count)
       }
       for (let col = right - count + 1; col <= right && col >= 0; col++) {
-        r[col] = emptyCell()
+        r.setEmpty(col)
       }
     }
     markScreenRowsDirty(top, bottom)
@@ -3737,12 +4011,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           // ESC # <digit>. DECALN (ESC # 8) fills the screen with 'E' and
           // homes the cursor — used for screen-alignment testing on real DEC gear.
           if (ch === "8") {
+            const alignCell = emptyCell()
+            alignCell.char = "E"
             for (let r = 0; r < rows; r++) {
               const row = grid[r]!
               for (let c = 0; c < cols; c++) {
-                const cell = emptyCell()
-                cell.char = "E"
-                row[c] = cell
+                row.setCellRaw(c, alignCell)
               }
               softWrapped[r] = false
             }
@@ -3886,16 +4160,16 @@ export function createScreen(options: ScreenOptions = {}): Screen {
    * Reconstruct logical lines from a grid, joining rows that were soft-wrapped.
    * Returns an array of logical lines, each being an array of ScreenCells (may be longer than cols).
    */
-  function getLogicalLines(srcGrid: ScreenCell[][], srcSoftWrapped: boolean[], srcRows: number): ScreenCell[][] {
+  function getLogicalLines(srcGrid: PackedRow[], srcSoftWrapped: boolean[], srcRows: number): ScreenCell[][] {
     const logical: ScreenCell[][] = []
     let currentLine: ScreenCell[] = []
 
     for (let r = 0; r < srcRows; r++) {
       const row = srcGrid[r]
       if (!row) continue
-      // Append this row's cells to the current logical line
+      // Materialize this row's cells into the current logical line
       for (let c = 0; c < row.length; c++) {
-        currentLine.push(row[c]!)
+        currentLine.push(row.getCellRaw(c))
       }
       if (srcSoftWrapped[r]) {
         // This row was soft-wrapped — continue accumulating into same logical line
@@ -3915,8 +4189,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   /**
    * Re-wrap logical lines to a new column width, producing grid rows and soft-wrap flags.
    */
-  function rewrapLines(logicalLines: ScreenCell[][], newCols: number): { rows: ScreenCell[][]; wrapped: boolean[] } {
-    const outRows: ScreenCell[][] = []
+  function rewrapLines(logicalLines: ScreenCell[][], newCols: number): { rows: PackedRow[]; wrapped: boolean[] } {
+    const outRows: PackedRow[] = []
     const outWrapped: boolean[] = []
 
     for (const line of logicalLines) {
@@ -3924,7 +4198,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       let lineLen = line.length
       while (lineLen > 0) {
         const cell = line[lineLen - 1]!
-        if (cell === EMPTY_CELL || (cell.char === "" && !cell.wide)) {
+        if (cell.char === "" && !cell.wide) {
           lineLen--
         } else {
           break
@@ -3949,7 +4223,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             // Wide char doesn't fit — leave rest of row empty, wrap to next
             break
           }
-          row[col] = cell === EMPTY_CELL ? EMPTY_CELL : { ...cell }
+          row.setCellRaw(col, cell)
           col++
           pos++
           // If cell was wide, the next cell in the logical line is the spacer
@@ -3964,14 +4238,22 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     return { rows: outRows, wrapped: outWrapped }
   }
 
+  /** True when a packed row has no printable content (all columns blank). */
+  function packedRowIsBlank(row: PackedRow): boolean {
+    for (let c = 0; c < row.length; c++) {
+      if (!(row.getChar(c) === "" && !row.isWide(c))) return false
+    }
+    return true
+  }
+
   /**
    * Trim trailing empty rows from reflowed result, so they don't push content off the top
    * when we take the last newRows rows.
    */
-  function trimTrailingEmptyRows(result: { rows: ScreenCell[][]; wrapped: boolean[] }): void {
+  function trimTrailingEmptyRows(result: { rows: PackedRow[]; wrapped: boolean[] }): void {
     while (result.rows.length > 1) {
       const lastRow = result.rows[result.rows.length - 1]!
-      const isEmpty = lastRow.every((cell) => cell === EMPTY_CELL || (cell.char === "" && !cell.wide))
+      const isEmpty = packedRowIsBlank(lastRow)
       if (isEmpty && !result.wrapped[result.rows.length - 2]) {
         // The row before wasn't soft-wrapped and this row is empty — trim it
         result.rows.pop()
@@ -4235,13 +4517,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   function getCell(row: number, col: number): ScreenCell {
     const r = grid[row]
     if (!r || col >= cols) return emptyCell()
-    return stripCellColorIndex(r[col]!)
+    return stripCellColorIndex(r.getCellRaw(col))
   }
 
   function getLine(row: number): ScreenCell[] {
     const r = grid[row]
-    if (!r) return makeRow(cols)
-    return r.map(stripCellColorIndex)
+    if (!r) return makeRow(cols).toCells()
+    return r.toCells().map(stripCellColorIndex)
   }
 
   function getText(): string {
@@ -4279,9 +4561,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   }
 
   function getRowAbsolute(row: number): ScreenCell[] {
-    if (row < 0 || row >= scrollback.length + rows) return makeRow(cols)
+    if (row < 0 || row >= scrollback.length + rows) return makeRow(cols).toCells()
     const src = row < scrollback.length ? scrollback[row]! : grid[row - scrollback.length]!
-    return src.map(stripCellColorIndex)
+    return src.toCells().map(stripCellColorIndex)
   }
 
   function firstRetainedRow(): number {
@@ -4309,19 +4591,19 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     return region
   }
 
-  function rowToString(row: ScreenCell[]): string {
+  function rowToString(row: PackedRow): string {
     let line = ""
     for (let i = 0; i < row.length; i++) {
-      const cell = row[i]!
-      if (cell.wide) {
-        line += cell.char
-      } else if (cell.char === "") {
-        if (i > 0 && row[i - 1]?.wide) {
+      const ch = row.getChar(i)
+      if (row.isWide(i)) {
+        line += ch
+      } else if (ch === "") {
+        if (i > 0 && row.isWide(i - 1)) {
           continue
         }
         line += " "
       } else {
-        line += cell.char
+        line += ch
       }
     }
     return line.replace(/\s+$/, "")
@@ -4339,10 +4621,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
       let line = ""
       for (let col = colStart; col < colEnd; col++) {
-        const cell = r[col]
-        if (!cell) continue
-        if (cell.char === "" && col > 0 && r[col - 1]?.wide) continue
-        line += cell.char || " "
+        if (col < 0 || col >= r.length) continue
+        const ch = r.getChar(col)
+        if (ch === "" && col > 0 && r.isWide(col - 1)) continue
+        line += ch || " "
       }
       parts.push(line.replace(/\s+$/, ""))
     }
