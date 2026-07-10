@@ -27,6 +27,7 @@ Part of the [vterm](https://github.com/beorn/vterm) monorepo.
 - **Character sets** — DEC Special Graphics (box drawing), UTF-8
 - **Soft terminal reset** — DECSTR
 - **Scrollback buffer** with configurable limit
+- **State serialization** — binary `snapshot()`/`restore()` for exact state, `serialize()`/`serializeSnapshot()` for a minimal-ANSI projection any VT-compatible terminal can replay
 - **Wide character support** — CJK, emoji ZWJ sequences, regional indicators, VS-16
 - **Full C0/C1 control code handling**
 - **Zero dependencies** — works in Bun, Node.js, and browsers
@@ -96,6 +97,26 @@ console.log(cell.fg) // { r: 255, g: 100, b: 0 }
 console.log(cell.underlineColor) // { r: 0, g: 150, b: 255 }
 ```
 
+### Serialize (state → ANSI)
+
+```typescript
+import { createVtermScreen, serializeSnapshot } from "vterm.js"
+
+const screen = createVtermScreen({ cols: 80, rows: 24 })
+screen.process(new TextEncoder().encode("Hello, \x1b[1;32mBold Green\x1b[0m World!"))
+
+// Re-encode current state as minimal ANSI a fresh same-size terminal can replay
+const ansi = screen.serialize()
+// Equivalent when you already hold a snapshot object:
+// const ansi = serializeSnapshot(screen.snapshot())
+
+const restored = createVtermScreen({ cols: 80, rows: 24 })
+restored.process(new TextEncoder().encode(ansi))
+console.log(restored.getText()) // "Hello, Bold Green World!" — text and styles both survived
+```
+
+`serialize(options?)` walks scrollback and the visible screen and emits a minimal SGR/mode/cursor stream that a fresh same-size terminal can replay: the pending pen at the cursor, DECAWM/insert/origin/reverse/app-cursor/app-keypad/bracketed/mouse/focus modes, margins, alt-screen, and cursor shape all survive the round trip. `SerializeOptions` toggles `includeScrollback` (default `true`), `includeTitle` (default `false`), `hyperlinks` (default `true`), and `excludeModes` (an array of mode keys to skip, leaving the receiver's fresh default for those). Two exclusions are always enforced and cannot be toggled off: synchronized-output mode (`?2026`) and DECCOLM (`?3`) are never emitted, since replaying either would wedge or wipe a real receiver. The inactive screen buffer, DECSC saved-cursor state, the color stack, and mid-parse parser state aren't representable in a VT byte stream and stay unserialized by design — use the binary `snapshot()`/`restore()` pair, or raw byte replay, when those need to cross too.
+
 ## API
 
 ### `createVtermScreen(options)`
@@ -129,6 +150,7 @@ console.log(cell.underlineColor) // { r: 0, g: 150, b: 255 }
 | `reset()`                      | Reset to initial state                                 |
 | `snapshot()`                   | Capture serializable T0-T3 terminal state              |
 | `restore(snapshot)`            | Restore a snapshot captured from `snapshot()`          |
+| `serialize(options?)`          | Re-encode current state as minimal ANSI a fresh same-size terminal can replay |
 
 ### Cell properties
 
