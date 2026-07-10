@@ -4693,7 +4693,15 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     semanticZones = []
     hasSixel = false
     sixelImages = []
-    clampCursor()
+    // Bound a malformed snapshot's cursor, but allow the past-the-end
+    // deferred-wrap position (curX == cols) that a full-width write leaves
+    // behind: clampCursor() would pull it onto the last column, making the
+    // first restored-session byte overwrite that cell instead of wrapping
+    // (the PROMPT_SP checkpoint/resume class).
+    if (curX < 0) curX = 0
+    if (curX > cols) curX = cols
+    if (curY < 0) curY = 0
+    if (curY >= rows) curY = rows - 1
     // Whole world replaced (incl. scrollback): restart the damage epoch and trim origin.
     markAllDirty()
     dirtyScrolled = 0

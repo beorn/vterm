@@ -2244,6 +2244,21 @@ function expectRestoredSnapshot(snapshot: VtermScreenSnapshot): void {
 }
 
 describe("snapshot / restore", () => {
+  test("round-trips the deferred-autowrap cursor (past-the-end position)", () => {
+    // The checkpoint/resume shape of the PROMPT_SP class: a full-width write
+    // leaves the cursor past the last column with the wrap pending. restore()
+    // must not clamp that to the last column, or the first byte written by
+    // the resumed session overwrites the final cell instead of wrapping.
+    const source = createVtermScreen({ cols: 10, rows: 4 })
+    source.process(enc.encode("AAAAAAAAAA")) // fills row 0 exactly; wrap pending
+    const restored = createVtermScreen({ cols: 10, rows: 4 })
+    restored.restore(source.snapshot())
+    expect(restored.getCursor()).toEqual({ col: 10, row: 0 })
+    restored.process(enc.encode("B"))
+    expect(restored.getCell(0, 9).char).toBe("A")
+    expect(restored.getCell(1, 0).char).toBe("B")
+  })
+
   test("round-trips T0-T3 screen state", () => {
     const screen = createVtermScreen({ cols: 8, rows: 3, scrollbackLimit: 20 })
     screen.process(enc.encode("\x1b]0;session-title\x07"))
