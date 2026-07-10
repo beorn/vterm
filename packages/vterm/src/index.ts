@@ -23,5 +23,10 @@ export {
   type TerminalOp,
   type ParserEvent,
   type DirtyRegion,
+  // Reactive read plane (§4 signals facade)
+  type ReadSignal,
+  type ScreenSignals,
+  type TerminalModes,
+  type Size,
 } from "./screen.ts"
 export { decodeScreenSnapshotBinary, encodeScreenSnapshotBinary } from "./snapshot-codec.ts"
