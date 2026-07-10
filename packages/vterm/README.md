@@ -201,6 +201,12 @@ console.log(replay.serialize() === screen.serialize()) // true
 | `getScrollbackLength()`        | Number of scrollback lines                             |
 | `getViewportOffset()`          | Current viewport scroll offset                         |
 | `scrollViewport(delta)`        | Scroll viewport                                        |
+| `totalRows()`                  | Buffer height: retained scrollback + screen            |
+| `screenRows()`                 | Visible screen row count                               |
+| `viewportTop()`                | Absolute row where the viewport's top line sits        |
+| `getRowAbsolute(row)`          | Cells at an ABSOLUTE row (0 = oldest retained line)    |
+| `firstRetainedRow()`           | Global index of retained row 0 (lines trimmed so far)  |
+| `takeDirty()`                  | Take + reset accumulated per-row damage (pull plane)   |
 | `resize(cols, rows)`           | Resize terminal                                        |
 | `reset()`                      | Reset to initial state                                 |
 | `snapshot()`                   | Capture serializable T0-T3 terminal state              |
@@ -228,6 +234,67 @@ interface ScreenCell {
   url: string | null // OSC 8 hyperlink
 }
 ```
+
+## Absolute rows and damage tracking
+
+Two engine-native read planes over the buffer, for renderers that address the whole
+history and repaint only what changed.
+
+### Absolute rows
+
+The buffer is the retained scrollback followed by the screen. **Absolute row 0 is the
+oldest retained scrollback line**; the screen occupies the last `screenRows()` rows
+(absolute `totalRows() - screenRows()` through `totalRows() - 1`). The existing
+screen-relative reads (`getLine`, `getCell`) are unchanged — absolute addressing is
+additive.
+
+```typescript
+screen.totalRows() // scrollback.length + screenRows()
+screen.screenRows() // the terminal's row dimension
+screen.getRowAbsolute(0) // Cell[] of the oldest retained line
+screen.viewportTop() // absolute row of the viewport's top line
+//   at the bottom → totalRows() - screenRows(); scrolled fully up → 0
+```
+
+Naming follows the ecosystem rule **row = cells, line = text**: `getRowAbsolute`
+returns cells; colors are stripped of palette-origin index at the read boundary (same
+contract as `getLine`). Out-of-range indices return a blank row.
+
+**Stability contract.** As lines scroll IN, an existing scrollback row keeps its
+absolute index (the screen shifts up in absolute terms, but its content keeps the same
+absolute index because scrollback grows by exactly the shift). When retention trimming
+evicts the oldest lines, every absolute index shifts down by the trimmed count and
+`firstRetainedRow()` bumps by the same amount. `firstRetainedRow()` is the **global**
+index of retained row 0 (the count of lines ever trimmed, `0` initially; reset by
+`reset()` / `restore()`). A stable global id is `firstRetainedRow() + <absolute row>`;
+an increase since a prior read signals a trim.
+
+### Damage tracking (`takeDirty`)
+
+`takeDirty()` returns the per-row damage accumulated since the previous call and resets
+the epoch. It is the **pull-plane** surface — a renderer reads it on its own schedule,
+independent of the push-plane `tapOps` / `tapParser`. Accumulation is always on; the
+write path costs at most one `Set` membership update per row-run (no per-cell
+allocation), and structural changes drop the set for the `"all"` sentinel.
+
+```typescript
+const { rows, cursor, scrolled } = screen.takeDirty()
+```
+
+| Field      | Type                    | Meaning                                                                 |
+| ---------- | ----------------------- | ----------------------------------------------------------------------- |
+| `rows`     | `Set<number> \| "all"`  | Changed rows as ABSOLUTE indices, or `"all"` on structural change       |
+| `cursor`   | `boolean`               | Cursor position / visibility / shape / blink changed since last take    |
+| `scrolled` | `number`                | Lines that entered scrollback since last take                           |
+
+`rows` is `"all"` on resize, full clear (ED 2/3), alt-screen switch, `reset()`, and
+`restore()`. The returned `Set` is **owned by the caller** — the engine keeps a fresh
+empty accumulator after the take. On a normal scroll only the newly-blanked bottom row
+is reported as changed (the other rows kept their absolute index) and `scrolled`
+increments, so a scrollback-preserving renderer shifts its viewport by `scrolled` and
+repaints just `rows`. `rows` indices are valid against the buffer at take time; if a
+take spanned a trim (`firstRetainedRow()` increased), rebase any cached indices by the
+delta.
 
 ## vs vt100.js
 
