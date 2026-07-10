@@ -21,7 +21,9 @@
  *   string table     varint count, then per entry: varint byte-length + UTF-8 bytes.
  *                    Entry 0 is always "". Holds every distinct cell `char` AND every
  *                    distinct `url` string.
- *   color table      varint count, then 3 bytes (r,g,b) per entry.
+ *   color table      varint count, then per entry: 3 bytes (r,g,b) followed by a
+ *                    varint palette-origin index (0 = true RGB / no index, else
+ *                    index+1, so a 0-255 index encodes as 1-256).
  *   style table      varint count, then per entry: varint flags (9 attribute bits +
  *                    3 underline-style bits) then four nullable refs as varints —
  *                    fg/bg/underlineColor into the color table, url into the string
@@ -357,11 +359,15 @@ function createInterner(): Interner {
     checkByte("color.r", c.r)
     checkByte("color.g", c.g)
     checkByte("color.b", c.b)
-    const key = `${c.r},${c.g},${c.b}`
+    if (c.index !== undefined) checkByte("color.index", c.index)
+    // The intern key includes the palette-origin index so a themeable indexed
+    // color and a true-RGB color that happen to share RGB intern to DISTINCT
+    // table entries — the serializer re-emits different SGR forms for them.
+    const key = c.index === undefined ? `${c.r},${c.g},${c.b}` : `${c.r},${c.g},${c.b},${c.index}`
     let idx = colorMap.get(key)
     if (idx === undefined) {
       idx = colorList.length
-      colorList.push({ r: c.r, g: c.g, b: c.b })
+      colorList.push(c.index === undefined ? { r: c.r, g: c.g, b: c.b } : { r: c.r, g: c.g, b: c.b, index: c.index })
       colorMap.set(key, idx)
     }
     return idx + 1
@@ -470,6 +476,8 @@ function writeColorTable(w: Writer, list: CellColor[]): void {
     w.u8(c.r)
     w.u8(c.g)
     w.u8(c.b)
+    // Palette-origin index: 0 = true RGB (no index), else index+1 (0-255 → 1-256).
+    w.varint(c.index === undefined ? 0 : c.index + 1)
   }
 }
 
@@ -498,7 +506,11 @@ function readColorTable(r: Reader): CellColor[] {
   const count = r.varint()
   const list = new Array<CellColor>(count)
   for (let i = 0; i < count; i++) {
-    list[i] = { r: r.u8(), g: r.u8(), b: r.u8() }
+    const cr = r.u8()
+    const cg = r.u8()
+    const cb = r.u8()
+    const idxPlus = r.varint() // 0 = no index; else palette-origin index = idxPlus - 1
+    list[i] = idxPlus === 0 ? { r: cr, g: cg, b: cb } : { r: cr, g: cg, b: cb, index: idxPlus - 1 }
   }
   return list
 }
@@ -526,7 +538,7 @@ function colorFromRef(ref: number, table: CellColor[]): CellColor | null {
   if (c === undefined) {
     throw new Error(`vterm snapshot codec: color ref ${ref} out of range (table size ${table.length})`)
   }
-  return { r: c.r, g: c.g, b: c.b }
+  return c.index === undefined ? { r: c.r, g: c.g, b: c.b } : { r: c.r, g: c.g, b: c.b, index: c.index }
 }
 
 function makeCell(

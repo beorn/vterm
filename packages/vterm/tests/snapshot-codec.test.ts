@@ -187,6 +187,20 @@ describe("snapshot-codec — round-trip deep equality", () => {
     expect(linkCell?.url).toBe("https://x.test/doc")
   })
 
+  test("indexed colors keep their palette-origin index through the codec (drift-fix)", () => {
+    // The interned color table must carry `index` DISTINCTLY from true RGB, else
+    // a checkpoint reload bakes indexed cells to truecolor and the serializer can
+    // no longer re-emit their themeable form. `roundTrip` already asserts full
+    // deep-equality (index included); these spot-check the exact provenance.
+    const screen = mkScreen(40, 2)
+    feed(screen, `${ESC}[31mR${ESC}[91mB${ESC}[38;5;196mC${ESC}[38;2;10;20;30mT`)
+    const decoded = roundTrip(screen.snapshot())
+    expect(decoded.main.grid[0]![0]!.fg).toStrictEqual({ r: 0x80, g: 0, b: 0, index: 1 }) // 31 → basic red idx 1
+    expect(decoded.main.grid[0]![1]!.fg).toStrictEqual({ r: 0xff, g: 0, b: 0, index: 9 }) // 91 → bright red idx 9
+    expect(decoded.main.grid[0]![2]!.fg).toStrictEqual({ r: 0xff, g: 0, b: 0, index: 196 }) // 38;5;196 → idx 196
+    expect(decoded.main.grid[0]![3]!.fg).toStrictEqual({ r: 10, g: 20, b: 30 }) // truecolor — NO index key
+  })
+
   test("wide / CJK + combining + ZWJ + VS-16 graphemes keep wide+spacer shape", () => {
     const screen = mkScreen(16, 3)
     feed(screen, `汉x🎈 `)

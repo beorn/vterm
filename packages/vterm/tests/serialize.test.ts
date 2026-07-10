@@ -318,10 +318,56 @@ describe("serializeSnapshot — pen goldens", () => {
     expect(sink.getCell(0, 2).faint).toBe(true)
   })
 
-  test("golden 4: 16/256/truecolor fg+bg all round-trip as resolved truecolor", () => {
+  test("golden 4: 16/256/truecolor fg+bg all round-trip faithfully", () => {
+    // Emission form changed by the indexed-identity fix: 16-color/256 inputs now
+    // re-emit their indexed SGR forms (not baked `x8;2;R;G;B`), truecolor stays
+    // truecolor. Equivalence still holds either way; the byte spellings are
+    // pinned by golden 11/11b/11c below.
     const source = mkScreen(30, 2)
     feed(source, `${ESC}[31;44m16 ${ESC}[38;5;178;48;5;24m256 ${ESC}[38;2;1;2;3;48;2;9;8;7mtru`)
     roundTripState(source, 30, 2)
+  })
+
+  test("golden 11: fg indexed identity survives serialization; truecolor stays truecolor", () => {
+    // The vterm↔vterm restore oracle is structurally BLIND to this class: both
+    // sides resolve `31` → {128,0,0}, so a digest agrees even when the serialized
+    // BYTES bake the index into truecolor and defeat the receiver's theme on
+    // reattach. These assert on the bytes: an indexed SGR must re-emit its
+    // faithful indexed form; true 24-bit color must stay truecolor.
+    const source = mkScreen(40, 2)
+    feed(source, `${ESC}[31mred ${ESC}[91mbright ${ESC}[38;5;196mx256 ${ESC}[38;2;10;20;30mtc`)
+    const ansi = serializeSnapshot(source.snapshot())
+    expect(ansi).toContain(`${ESC}[31m`) // basic red — NOT baked 38;2;128;0;0
+    expect(ansi).toContain(`${ESC}[91m`) // bright red — NOT baked 38;2;255;0;0
+    expect(ansi).toContain("38;5;196") // 256-cube index kept verbatim
+    expect(ansi).not.toContain("38;2;128;0;0") // vterm stock red (ANSI_16[1]) would be baked here
+    expect(ansi).not.toContain("38;2;255;0;0") // stock bright-red / cube-196 (#ff0000) bake
+    expect(ansi).toContain("38;2;10;20;30") // true 24-bit color is NOT an index → stays truecolor
+    roundTripState(source, 40, 2) // new emission forms still parse back identically (the oracle)
+  })
+
+  test("golden 11b: bg indexed identity (basic/bright/256) survives; truecolor stays", () => {
+    const source = mkScreen(40, 2)
+    feed(source, `${ESC}[41mR ${ESC}[101mB ${ESC}[48;5;21mC ${ESC}[48;2;1;2;3mD`)
+    const ansi = serializeSnapshot(source.snapshot())
+    expect(ansi).toContain(`${ESC}[41m`) // basic bg red
+    expect(ansi).toContain(`${ESC}[101m`) // bright bg (100-107 literal — NOT truecolor)
+    expect(ansi).toContain("48;5;21") // 256 bg index kept
+    expect(ansi).not.toContain("48;2;128;0;0") // stock bg red (idx 1) bake
+    expect(ansi).not.toContain("48;2;255;0;0") // stock bright bg (idx 9) bake
+    expect(ansi).not.toContain("48;2;0;0;255") // stock cube-21 (#0000ff) bake
+    expect(ansi).toContain("48;2;1;2;3") // truecolor bg stays truecolor
+    roundTripState(source, 40, 2)
+  })
+
+  test("golden 11c: underline color 58;5;N survives as indexed; 58;2 stays truecolor", () => {
+    const source = mkScreen(40, 2)
+    feed(source, `${ESC}[4;58;5;226mU ${ESC}[58;2;7;8;9mV`)
+    const ansi = serializeSnapshot(source.snapshot())
+    expect(ansi).toContain("58;5;226") // indexed underline color kept (no 3N/9N short form exists)
+    expect(ansi).not.toContain("58;2;255;255;0") // stock cube-226 (#ffff00) bake
+    expect(ansi).toContain("58;2;7;8;9") // truecolor underline stays truecolor
+    roundTripState(source, 40, 2)
   })
 
   test("golden 5: hyperlink (OSC 8) run mid-row survives", () => {

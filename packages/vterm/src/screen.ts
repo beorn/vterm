@@ -39,6 +39,23 @@ export interface CellColor {
   r: number
   g: number
   b: number
+  /**
+   * The palette index (0-255) this RGB was resolved from, when the color came
+   * from an INDEXED SGR (`31`, `91`, `38;5;N`, `48;5;N`, `58;5;N`, …). Absent
+   * for true 24-bit RGB (`38;2;R;G;B`) and for OSC-sourced colors (OSC 4/10/11),
+   * which are genuine RGB with no themeable index.
+   *
+   * Why it exists: vterm resolves every indexed SGR to `palette256[idx]` at parse
+   * time. Without keeping the origin index, {@link serializeSnapshot} can only
+   * re-emit `38;2;R;G;B`, which bakes vterm's built-in ANSI values and defeats the
+   * outer terminal's theme on reattach. Preserving `index` lets the serializer
+   * re-emit the faithful indexed form so a themeable receiver themes it again.
+   *
+   * It rides {@link ScreenSnapshot} as plain optional data (like
+   * `scrollbackSoftWrapped`) and is stripped at the {@link VtermScreen.getCell} /
+   * {@link VtermScreen.getLine} read boundary, whose contract is the resolved RGB.
+   */
+  index?: number
 }
 
 export type UnderlineStyle = "none" | "single" | "double" | "curly" | "dotted" | "dashed"
@@ -279,6 +296,29 @@ const EMPTY_CELL: ScreenCell = Object.freeze({
 
 function emptyCell(): ScreenCell {
   return { ...EMPTY_CELL }
+}
+
+/**
+ * Drop the palette-origin {@link CellColor.index} for the public per-cell read
+ * boundary. `getCell`/`getLine` return the RESOLVED RGB — their long-standing
+ * contract — while the origin index is serialization-only provenance that rides
+ * {@link ScreenSnapshot} (and thus `serialize()`), not the inspection API.
+ * Returns the SAME reference when there is no index (the common truecolor/null
+ * case), so the read path allocates nothing there.
+ */
+function stripColorIndex(c: CellColor | null): CellColor | null {
+  if (c === null || c.index === undefined) return c
+  return { r: c.r, g: c.g, b: c.b }
+}
+
+/** Shallow cell copy with each color stripped of its palette-origin index. */
+function stripCellColorIndex(cell: ScreenCell): ScreenCell {
+  return {
+    ...cell,
+    fg: stripColorIndex(cell.fg),
+    bg: stripColorIndex(cell.bg),
+    underlineColor: stripColorIndex(cell.underlineColor),
+  }
 }
 
 // ── ANSI 256-color palette ─────────────────────────────────────────────
@@ -2380,7 +2420,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case 35:
         case 36:
         case 37:
-          attrs.fg = { ...palette256[code - 30]! }
+          attrs.fg = { ...palette256[code - 30]!, index: code - 30 } // basic fg 30-37 → palette idx 0-7
           break
         case 38: {
           // Extended foreground: 38;5;N (256) or 38;2;R;G;B (truecolor)
@@ -2410,7 +2450,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case 45:
         case 46:
         case 47:
-          attrs.bg = { ...palette256[code - 40]! }
+          attrs.bg = { ...palette256[code - 40]!, index: code - 40 } // basic bg 40-47 → palette idx 0-7
           break
         case 48: {
           // Extended background: 48;5;N (256) or 48;2;R;G;B (truecolor)
@@ -2464,7 +2504,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case 95:
         case 96:
         case 97:
-          attrs.fg = { ...palette256[code - 90 + 8]! }
+          attrs.fg = { ...palette256[code - 90 + 8]!, index: code - 90 + 8 } // bright fg 90-97 → palette idx 8-15
           break
         // Bright background 100-107
         case 100:
@@ -2475,7 +2515,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case 105:
         case 106:
         case 107:
-          attrs.bg = { ...palette256[code - 100 + 8]! }
+          attrs.bg = { ...palette256[code - 100 + 8]!, index: code - 100 + 8 } // bright bg 100-107 → palette idx 8-15
           break
       }
       i++
@@ -2488,8 +2528,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     const type = params[startIndex + 1]
     if (type === 5 && startIndex + 2 < params.length) {
       const idx = params[startIndex + 2]!
-      const color = palette256[idx] ?? { r: 0, g: 0, b: 0 }
-      return { color: { ...color }, nextIndex: startIndex + 3 }
+      // 256-color (`38;5;N` / `48;5;N` / `58;5;N`) → tag the origin index so the
+      // serializer re-emits the indexed form. A malformed out-of-range N has no
+      // palette entry, so fall back to bare black with NO index (never emit `x8;5;>255`).
+      const entry = palette256[idx]
+      const color: CellColor = entry ? { ...entry, index: idx } : { r: 0, g: 0, b: 0 }
+      return { color, nextIndex: startIndex + 3 }
     } else if (type === 2 && startIndex + 4 < params.length) {
       return {
         color: {
@@ -2509,8 +2553,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     const type = subs[1]
     if (type === 5 && subs.length >= 3) {
       const idx = subs[2]!
-      const color = palette256[idx] ?? { r: 0, g: 0, b: 0 }
-      return { ...color }
+      // Colon form `38:5:N` etc. — same index-tagging as the semicolon form above.
+      const entry = palette256[idx]
+      return entry ? { ...entry, index: idx } : { r: 0, g: 0, b: 0 }
     } else if (type === 2) {
       // Can be 38:2:R:G:B or 38:2:colorspace:R:G:B
       if (subs.length >= 5) {
@@ -3825,13 +3870,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   function getCell(row: number, col: number): ScreenCell {
     const r = grid[row]
     if (!r || col >= cols) return emptyCell()
-    return { ...r[col]! }
+    return stripCellColorIndex(r[col]!)
   }
 
   function getLine(row: number): ScreenCell[] {
     const r = grid[row]
     if (!r) return makeRow(cols)
-    return r.map((cell) => ({ ...cell }))
+    return r.map(stripCellColorIndex)
   }
 
   function getText(): string {
@@ -4079,7 +4124,16 @@ function serializeUnderlineParam(style: UnderlineStyle): string {
 
 function serializeColorEq(a: CellColor | null, b: CellColor | null): boolean {
   if (a === null || b === null) return a === b
-  return a.r === b.r && a.g === b.g && a.b === b.b
+  // Include the palette-origin index in equality: two colors with identical RGB
+  // but different provenance (e.g. `31` → {128,0,0,index:1} vs the true-RGB
+  // `38;2;128;0;0` → {128,0,0}) must NOT be treated as equal. Otherwise the
+  // run-merger would fold them into one SGR run and re-emit the FIRST cell's
+  // form for both, re-theming a cell the app authored as literal RGB (or baking
+  // one it authored as indexed). Costs a few extra SGR runs at a provenance
+  // boundary; guarantees each cell re-emits its own faithful form. Palette
+  // entries (OSC-4 diff, defaults) carry no index, so their equality is
+  // unchanged (both `index` undefined → compared by RGB only).
+  return a.r === b.r && a.g === b.g && a.b === b.b && a.index === b.index
 }
 
 function serializePenOf(source: SerializePen): SerializePen {
@@ -4122,6 +4176,25 @@ function serializePenIsDefault(pen: SerializePen): boolean {
 
 function serializeColorParams(prefix: string, defaultCode: string, color: CellColor | null): string {
   if (color === null) return defaultCode
+  const idx = color.index
+  if (idx !== undefined && idx >= 0 && idx <= 255) {
+    // Indexed-identity: re-emit the shortest faithful indexed SGR form (never a
+    // baked `x8;2;R;G;B`) so a themeable receiver re-themes the cell on reattach.
+    //   fg  (`38`): basic 30-37, bright 90-97, else 256-indexed `38;5;N`
+    //   bg  (`48`): basic 40-47, bright 100-107, else 256-indexed `48;5;N`
+    //   underline (`58`): no basic/bright short form → always `58;5;N`
+    if (prefix === "38") {
+      if (idx <= 7) return String(30 + idx)
+      if (idx <= 15) return String(90 + (idx - 8))
+      return `38;5;${String(idx)}`
+    }
+    if (prefix === "48") {
+      if (idx <= 7) return String(40 + idx)
+      if (idx <= 15) return String(100 + (idx - 8))
+      return `48;5;${String(idx)}`
+    }
+    return `${prefix};5;${String(idx)}`
+  }
   return `${prefix};2;${String(color.r)};${String(color.g)};${String(color.b)}`
 }
 
@@ -4364,9 +4437,7 @@ export function serializeSnapshot(snapshot: ScreenSnapshot, options: SerializeOp
   // SCP saved-cursor slot; cursor.savedX/savedY do not round-trip.)
   if (snapshot.activeBuffer === "alt") out.push("\x1b[?1049h")
   if (snapshot.margins.scrollTop !== 0 || snapshot.margins.scrollBottom !== rows - 1) {
-    out.push(
-      `\x1b[${String(snapshot.margins.scrollTop + 1)};${String(snapshot.margins.scrollBottom + 1)}r`,
-    )
+    out.push(`\x1b[${String(snapshot.margins.scrollTop + 1)};${String(snapshot.margins.scrollBottom + 1)}r`)
   }
 
   // Phase 3 — paint-safe modes and receiver-level state. Set-forms only —
@@ -4379,10 +4450,7 @@ export function serializeSnapshot(snapshot: ScreenSnapshot, options: SerializeOp
     out.push(`\x1b[?${String(m.mouseTrackingMode)}h`)
   }
   if (m.applicationKeypad && !excluded.has("applicationKeypad")) out.push("\x1b=")
-  if (
-    !excluded.has("kittyKeyboardFlags") &&
-    (m.kittyKeyboardFlags !== 0 || m.kittyKeyboardStack.length > 0)
-  ) {
+  if (!excluded.has("kittyKeyboardFlags") && (m.kittyKeyboardFlags !== 0 || m.kittyKeyboardStack.length > 0)) {
     // Rebuild (flags, stack): seed the stack bottom with `=` (set, no push),
     // push the rest — each push captures the previous flags — then land on the
     // live flags. Requires the CSI = u handler this slice added to the parser.
@@ -4427,9 +4495,7 @@ export function serializeSnapshot(snapshot: ScreenSnapshot, options: SerializeOp
   // cursor) → pending pen → visibility → origin + final CUP LAST.
   out.push(m.autoWrap ? "\x1b[?7h" : "\x1b[?7l")
   if (snapshot.cursor.shape !== "block" || !snapshot.cursor.blinking) {
-    out.push(
-      `\x1b[${String(serializeCursorStyleCode(snapshot.cursor.shape, snapshot.cursor.blinking))} q`,
-    )
+    out.push(`\x1b[${String(serializeCursorStyleCode(snapshot.cursor.shape, snapshot.cursor.blinking))} q`)
   }
   if (snapshot.unicode.charsetG0) out.push("\x1b(0")
   if (m.insert && !excluded.has("insert")) out.push("\x1b[4h")
@@ -4457,14 +4523,10 @@ export function serializeSnapshot(snapshot: ScreenSnapshot, options: SerializeOp
   // after moving) is placed absolutely first, then origin is restored — the
   // region-relative form would clamp it to the region.
   const origin = m.origin && !excluded.has("origin")
-  const inRegion =
-    snapshot.cursor.y >= snapshot.margins.scrollTop &&
-    snapshot.cursor.y <= snapshot.margins.scrollBottom
+  const inRegion = snapshot.cursor.y >= snapshot.margins.scrollTop && snapshot.cursor.y <= snapshot.margins.scrollBottom
   if (origin && inRegion) {
     out.push("\x1b[?6h")
-    out.push(
-      `\x1b[${String(snapshot.cursor.y - snapshot.margins.scrollTop + 1)};${String(snapshot.cursor.x + 1)}H`,
-    )
+    out.push(`\x1b[${String(snapshot.cursor.y - snapshot.margins.scrollTop + 1)};${String(snapshot.cursor.x + 1)}H`)
   } else {
     out.push(`\x1b[${String(snapshot.cursor.y + 1)};${String(snapshot.cursor.x + 1)}H`)
     if (origin) out.push("\x1b[?6h")
