@@ -19,6 +19,7 @@ Part of the [vterm](https://github.com/beorn/vterm) monorepo.
 - **Focus tracking** — mode 1004
 - **Synchronized output** — mode 2026
 - **Application cursor keys & keypad**
+- **Kitty keyboard protocol** — progressive-enhancement flags with a push/pop/set stack (`CSI u`)
 - **OSC sequences** — window title (OSC 0/2), hyperlinks (OSC 8), clipboard (OSC 52), colors
 - **DCS sequences** — consumed and ignored, XTVERSION response
 - **Device attributes** — DA1/DA2/DA3 responses
@@ -97,6 +98,22 @@ console.log(cell.fg) // { r: 255, g: 100, b: 0 }
 console.log(cell.underlineColor) // { r: 0, g: 150, b: 255 }
 ```
 
+### Kitty keyboard
+
+Progressive keyboard enhancement (the Kitty protocol) is negotiated through a flags stack:
+
+```typescript
+screen.process(new TextEncoder().encode("\x1b[>1u")) // push: save current flags, install flags=1
+screen.process(new TextEncoder().encode("\x1b[<u")) //  pop: restore the previously pushed flags
+screen.process(new TextEncoder().encode("\x1b[=5;2u")) // set: OR flags=5 into the live flags
+```
+
+- **push** — `CSI > flags u` saves the current flags on the stack, then installs `flags`
+- **pop** — `CSI < u` restores the flags at the top of the stack (empty stack → `0`)
+- **set** — `CSI = flags ; mode u` writes directly without touching the stack: mode `1` (or omitted) assigns, `2` ORs the given bits in, `3` clears them
+
+The flags and their stack survive `snapshot()`/`restore()`, and `serialize()` reconstructs any `(flags, stack)` pair by seeding the stack bottom with one set (`CSI = u`), replaying the remaining stack entries as pushes (`CSI > u`), and landing on the live flags with a final push.
+
 ### Serialize (state → ANSI)
 
 ```typescript
@@ -116,6 +133,10 @@ console.log(restored.getText()) // "Hello, Bold Green World!" — text and style
 ```
 
 `serialize(options?)` walks scrollback and the visible screen and emits a minimal SGR/mode/cursor stream that a fresh same-size terminal can replay: the pending pen at the cursor, DECAWM/insert/origin/reverse/app-cursor/app-keypad/bracketed/mouse/focus modes, margins, alt-screen, and cursor shape all survive the round trip. `SerializeOptions` toggles `includeScrollback` (default `true`), `includeTitle` (default `false`), `hyperlinks` (default `true`), and `excludeModes` (an array of mode keys to skip, leaving the receiver's fresh default for those). Two exclusions are always enforced and cannot be toggled off: synchronized-output mode (`?2026`) and DECCOLM (`?3`) are never emitted, since replaying either would wedge or wipe a real receiver. The inactive screen buffer, DECSC saved-cursor state, the color stack, and mid-parse parser state aren't representable in a VT byte stream and stay unserialized by design — use the binary `snapshot()`/`restore()` pair, or raw byte replay, when those need to cross too.
+
+**Phase order.** The emit stream is five ordered phases: **history** (scrollback flushed via CRLF, since CUP cannot address it) → **geometry** (`?1049h` alt-enter and the DECSTBM scroll region — both home the cursor) → **paint-safe modes** (DECSET set-forms only, mouse, kitty keyboard, palette/default colors, optional title) → **paint** (DECAWM off, `CSI H` home + `CSI 2J` clear, then positioned pen-diff rows) → **finalize** (autowrap, cursor shape, charset, insert, tab stops, DECSLRM, pending pen, visibility, cursor). Two constraints are load-bearing: **no geometry op may follow the cursor** (all homing must precede the paint), and the **cursor is restored last** — emitted region-relative (`?6h` origin then a margin-relative `CSI H`) when origin mode is set and the target lies inside the scroll region, absolute otherwise. `?2026` (synchronized output) and `?3` (DECCOLM) are never emitted — replaying either would wedge or wipe a live receiver.
+
+**Soft-wrap history.** `Snapshot` carries `scrollbackSoftWrapped: boolean[]` alongside `scrollback` — bit `i` true means scrollback row `i` wraps into row `i+1` (one logical line split across rows); an absent array (older stored v1 snapshots) is treated as all-false. Phase-1 history re-links a wrapped row by emitting it at full width with no line break, so the receiver's own autowrap re-records the bit as the row scrolls back.
 
 ### Ops and taps
 
