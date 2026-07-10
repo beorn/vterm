@@ -4320,12 +4320,26 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   /**
    * Re-wrap logical lines to a new column width, producing grid rows and soft-wrap flags.
+   *
+   * `track` names one position — a logical line index plus a cell offset
+   * within that line (the cursor, expressed content-relative) — and the
+   * returned `tracked` reports the output row/col it lands on, so `resize()`
+   * can move the cursor WITH its logical line instead of leaving it at its
+   * old absolute row. An offset at/beyond the trimmed line end (cursor in
+   * trailing blanks or one past the last cell) lands after the last emitted
+   * cell, advanced by the leftover distance, clamped to the row.
    */
-  function rewrapLines(logicalLines: ScreenCell[][], newCols: number): { rows: PackedRow[]; wrapped: boolean[] } {
+  function rewrapLines(
+    logicalLines: ScreenCell[][],
+    newCols: number,
+    track?: { line: number; offset: number },
+  ): { rows: PackedRow[]; wrapped: boolean[]; tracked: { row: number; col: number } | null } {
     const outRows: PackedRow[] = []
     const outWrapped: boolean[] = []
+    let tracked: { row: number; col: number } | null = null
 
-    for (const line of logicalLines) {
+    for (let li = 0; li < logicalLines.length; li++) {
+      const line = logicalLines[li]!
       // Trim trailing empty cells from logical line
       let lineLen = line.length
       while (lineLen > 0) {
@@ -4341,6 +4355,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         // Empty logical line — produce one empty row
         outRows.push(makeRow(newCols))
         outWrapped.push(false)
+        if (track !== undefined && track.line === li) {
+          tracked = { row: outRows.length - 1, col: Math.min(track.offset, newCols - 1) }
+        }
         continue
       }
 
@@ -4355,6 +4372,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             // Wide char doesn't fit — leave rest of row empty, wrap to next
             break
           }
+          if (track !== undefined && track.line === li && pos === track.offset) {
+            tracked = { row: outRows.length, col }
+          }
           row.setCellRaw(col, cell)
           col++
           pos++
@@ -4364,10 +4384,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         const moreContent = pos < lineLen
         outRows.push(row)
         outWrapped.push(moreContent) // soft-wrapped if there's more content to come
+        if (!moreContent && track !== undefined && track.line === li && tracked === null) {
+          const extra = track.offset - lineLen
+          tracked = { row: outRows.length - 1, col: Math.min(newCols - 1, col + extra) }
+        }
       }
     }
 
-    return { rows: outRows, wrapped: outWrapped }
+    return { rows: outRows, wrapped: outWrapped, tracked }
   }
 
   /** True when a packed row has no printable content (all columns blank). */
@@ -4397,14 +4421,29 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   }
 
   function resize(newCols: number, newRows: number): void {
+    // Express the cursor content-relative BEFORE reflow (active buffer only):
+    // its logical line index + cell offset within that line. Reflow changes
+    // row identities, so an absolute (curX, curY) goes stale — the cursor
+    // must follow its logical line like xterm/ghostty/kitty, or post-resize
+    // output lands at the old row and leaves a blank band where wraps sat.
+    const activeWrappedPre = useAltScreen ? altSoftWrapped : mainSoftWrapped
+    const cursorRowPre = Math.min(Math.max(curY, 0), rows - 1)
+    let cursorLineStart = cursorRowPre
+    while (cursorLineStart > 0 && activeWrappedPre[cursorLineStart - 1]) cursorLineStart--
+    let cursorLineIdx = 0
+    for (let r = 0; r < cursorLineStart; r++) {
+      if (!activeWrappedPre[r]) cursorLineIdx++
+    }
+    const cursorTrack = { line: cursorLineIdx, offset: (cursorRowPre - cursorLineStart) * cols + curX }
+
     // Reflow main grid
     const mainLogical = getLogicalLines(mainGrid, mainSoftWrapped, rows)
-    const mainResult = rewrapLines(mainLogical, newCols)
+    const mainResult = rewrapLines(mainLogical, newCols, useAltScreen ? undefined : cursorTrack)
     trimTrailingEmptyRows(mainResult)
 
     // Reflow alt grid (usually not reflowed, but do it for consistency)
     const altLogical = getLogicalLines(altGrid, altSoftWrapped, rows)
-    const altResult = rewrapLines(altLogical, newCols)
+    const altResult = rewrapLines(altLogical, newCols, useAltScreen ? cursorTrack : undefined)
     trimTrailingEmptyRows(altResult)
 
     // Build new grids: if reflowed content fits, place at top; if it overflows, take the last newRows
@@ -4423,6 +4462,16 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     for (let r = 0; r < newRows && altStartRow + r < altResult.rows.length; r++) {
       newAlt[r] = altResult.rows[altStartRow + r]!
       newAltWrapped[r] = altResult.wrapped[altStartRow + r]!
+    }
+
+    // Land the cursor where its logical line went (tracked pre-reflow above).
+    const activeResult = useAltScreen ? altResult : mainResult
+    const activeStartRow = useAltScreen ? altStartRow : mainStartRow
+    if (activeResult.tracked !== null) {
+      // Trim may have removed the cursor's own blank row — allow landing one
+      // row past the remaining content; clampCursor() bounds it to the grid.
+      curY = Math.min(activeResult.tracked.row, activeResult.rows.length) - activeStartRow
+      curX = activeResult.tracked.col
     }
 
     mainGrid = newMain

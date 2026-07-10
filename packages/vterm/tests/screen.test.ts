@@ -1479,6 +1479,45 @@ describe("text reflow", () => {
     expect(screen.getCell(0, 0).char).toBe("a")
     expect(screen.getCell(0, 14).char).toBe("o")
   })
+
+  test("cursor follows its logical line through widening reflow", () => {
+    const screen = createVtermScreen({ cols: 10, rows: 6 })
+    screen.process(enc.encode("abcdefghijklmno")) // soft-wraps rows 0-1
+    screen.process(enc.encode("\r\n> ")) // prompt on its own hard line
+    expect(screen.getCursor()).toEqual({ col: 2, row: 2 })
+    screen.resize(20, 6) // packs the wrapped line into row 0; prompt moves to row 1
+    expect(screen.getCell(1, 0).char).toBe(">")
+    // The cursor must move WITH its logical line, not stay at its old row.
+    expect(screen.getCursor()).toEqual({ col: 2, row: 1 })
+  })
+
+  test("output after widening reflow continues adjacent to content (no blank band)", () => {
+    // The recorded-session shape behind the journal differential divergence:
+    // wrapped output, in-stream widen, more output. The post-resize output
+    // must land directly under the packed content — not at the cursor's old
+    // absolute row, which leaves a blank band where the wraps used to be.
+    const screen = createVtermScreen({ cols: 10, rows: 8 })
+    screen.process(enc.encode("abcdefghijklmno\r\n")) // rows 0-1 + cursor on row 2
+    screen.resize(20, 8)
+    screen.process(enc.encode("next"))
+    expect(screen.getCell(1, 0).char).toBe("n")
+    expect(screen.getCell(2, 0).char).toBe("")
+  })
+
+  test("cursor follows its logical line when narrowing splits it", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 8 })
+    screen.process(enc.encode("abcdefghijklmno")) // one row, cursor at col 15
+    screen.resize(10, 8) // splits into rows 0-1
+    expect(screen.getCell(1, 0).char).toBe("k")
+    expect(screen.getCursor()).toEqual({ col: 5, row: 1 })
+  })
+
+  test("cursor on a blank line below content survives widening reflow", () => {
+    const screen = createVtermScreen({ cols: 10, rows: 6 })
+    screen.process(enc.encode("abcdefghijkl\r\n")) // rows 0-1 wrapped, cursor row 2 col 0
+    screen.resize(20, 6) // content packs to row 0
+    expect(screen.getCursor()).toEqual({ col: 0, row: 1 })
+  })
 })
 
 // ═══════════════════════════════════════════════════════
