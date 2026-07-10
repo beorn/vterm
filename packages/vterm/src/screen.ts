@@ -332,9 +332,104 @@ export interface DirtyRegion {
   scrolled: number
 }
 
+/**
+ * A minimal read-signal — the atom of the REACTIVE read plane (§4). Defined IN vterm.js, which
+ * stays dependency-free (§9 rule 7: compatible SHAPES over shared imports). A consumer wraps it in
+ * `alien-signals`, a zustand store, or React's `useSyncExternalStore` trivially, because the shape
+ * is exactly `{ get, subscribe }` — nothing here imports a reactive library.
+ *
+ * - `get()` returns the CURRENT value, computed live from engine state. It is pull-safe and
+ *   independent of subscription: calling it never schedules, consumes, or resets a delivery.
+ * - `subscribe(listener)` registers for change delivery and returns an unsubscribe function. The
+ *   listener fires at most once per flush boundary (see {@link ScreenSignals}), and only when the
+ *   value actually changed since the last delivery (equality-gated). Subscribing does NOT fire
+ *   immediately — the baseline is the value at subscribe time, so only later changes deliver.
+ *   Fail-loud: a throwing listener propagates out of the write call.
+ */
+export interface ReadSignal<T> {
+  get(): T
+  subscribe(listener: (value: T) => void): () => void
+}
+
+/** The terminal's screen size (its column/row dimensions). Emitted by {@link ScreenSignals.size$}. */
+export interface Size {
+  cols: number
+  rows: number
+}
+
+/**
+ * The closed DEC/xterm private-mode set at the OBSERVATION boundary — everything a guest previously
+ * discovered by regex-scanning the DECSET byte stream. Emitted by {@link ScreenSignals.modes$}
+ * (equality-gated: one emission per flush that actually flips a mode). Mirrors the string keys of
+ * {@link Screen.getMode}, plus the numeric mouse-tracking protocol level.
+ */
+export interface TerminalModes {
+  altScreen: boolean
+  cursorVisible: boolean
+  bracketedPaste: boolean
+  applicationCursor: boolean
+  applicationKeypad: boolean
+  autoWrap: boolean
+  mouseTracking: boolean
+  /** The active mouse-tracking protocol: `0` = off; `1000`/`1002`/`1003` = X10/button/any-event. */
+  mouseTrackingMode: number
+  sgrMouse: boolean
+  utf8Mouse: boolean
+  focusTracking: boolean
+  originMode: boolean
+  insertMode: boolean
+  reverseVideo: boolean
+  syncOutput: boolean
+  leftRightMargin: boolean
+  colorSchemeReporting: boolean
+  kittyKeyboard: boolean
+  kittyGraphics: boolean
+  sixel: boolean
+}
+
+/**
+ * The REACTIVE read plane (§4): five equality-gated signals over the SAME state the pull plane
+ * ({@link Screen.getRowAbsolute}/{@link Screen.takeDirty}) and the push plane ({@link Screen.tapOps})
+ * expose. It replaces consumers' title-polling and DECSET regex scanning.
+ *
+ * Zero overhead when unused: `.signals` is lazily created (the getter allocates nothing until first
+ * read), and each signal is lazily created on first access (per-signal laziness). The write core does
+ * NO signal bookkeeping until `.signals` is read, and NO per-write damage accumulation until
+ * `damage$` actually has a subscriber.
+ *
+ * Flush boundary: every signal coalesces to AT MOST ONE emission per public state-mutating call
+ * (`process`/`apply`/`resize`/`reset`/`restore`; `apply` inherits it via `process`/`resize`) — the
+ * natural batch. `title$`/`modes$`/`cursor$`/`size$` fire only when their value actually changed
+ * across the call; `damage$` publishes the BATCHED dirty-set accumulated during the call.
+ *
+ * Two-plane coexistence: `damage$` runs on an accumulator INDEPENDENT of {@link Screen.takeDirty}.
+ * Subscribing never steals or resets the pull-plane epoch, so a `damage$` renderer and a
+ * `takeDirty()` differ observe the same damage without draining each other.
+ */
+export interface ScreenSignals {
+  /** The window title (OSC 0/2). Replaces title-diff polling. */
+  title$: ReadSignal<string>
+  /** The closed DEC/xterm mode set. Replaces the guest's DECSET regex scanner. */
+  modes$: ReadSignal<TerminalModes>
+  /** The cursor position in grid `col`/`row` (§9). Visibility rides {@link modes$}`.cursorVisible`. */
+  cursor$: ReadSignal<Cursor>
+  /** The screen size. */
+  size$: ReadSignal<Size>
+  /**
+   * The per-flush BATCHED dirty region — the union of rows changed during the call (or `"all"` on a
+   * structural change), with the cursor/scroll deltas. Same shape as {@link Screen.takeDirty}, but
+   * drained on its OWN epoch (see the interface note); this is precisely what a future canvas/DOM
+   * renderer subscribes to. The emitted region (including its `rows` `Set`) is SHARED across all
+   * `damage$` subscribers for that flush — treat it as read-only.
+   */
+  damage$: ReadSignal<DirtyRegion>
+}
+
 export interface Screen {
   readonly cols: number
   readonly rows: number
+  /** The reactive read plane (§4). Lazily created; zero write-path overhead until used. */
+  readonly signals: ScreenSignals
 
   process(data: Uint8Array): void
   resize(cols: number, rows: number): void
@@ -1508,24 +1603,48 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let trimmedRowCount = 0
   let dirtyCursor = { x: 0, y: 0, visible: true, shape: "block" as "block" | "underline" | "bar", blinking: true }
 
+  // ── Signal-plane damage accumulator (reactive read plane, §4) ──
+  // An accumulator INDEPENDENT of the pull-plane dirty* set above, so `signals.damage$` and
+  // `takeDirty()` never drain each other (the two-plane coexistence contract). Maintained ONLY
+  // while `damage$` has a subscriber (`sigDamageActive`) — when inactive, the mark functions do a
+  // single boolean check and no bookkeeping, keeping the write core allocation-free. It is drained
+  // and broadcast at every flush boundary (see `flushSignals`) rather than on `takeDirty()`.
+  let sigDamageActive = false
+  let sigDirtyAll = false
+  let sigDirtyRows = new Set<number>()
+  let sigDirtyScrolled = 0
+  let sigDirtyLastAbs = -1
+  let sigDirtyCursor = { x: 0, y: 0, visible: true, shape: "block" as "block" | "underline" | "bar", blinking: true }
+
   function markScreenRowDirty(screenRow: number): void {
-    if (dirtyAll) return
     const abs = scrollback.length + screenRow
-    if (abs === dirtyLastAbs) return
-    dirtyLastAbs = abs
-    dirtyRows.add(abs)
+    // Pull plane (always on).
+    if (!dirtyAll && abs !== dirtyLastAbs) {
+      dirtyLastAbs = abs
+      dirtyRows.add(abs)
+    }
+    // Signal plane (only while damage$ is subscribed) — its own epoch, own collapse cursor.
+    if (sigDamageActive && !sigDirtyAll && abs !== sigDirtyLastAbs) {
+      sigDirtyLastAbs = abs
+      sigDirtyRows.add(abs)
+    }
   }
 
   function markScreenRowsDirty(top: number, bottom: number): void {
-    if (dirtyAll) return
+    if (dirtyAll && (!sigDamageActive || sigDirtyAll)) return
     for (let r = top; r <= bottom; r++) markScreenRowDirty(r)
   }
 
-  /** Structural change — the whole visible buffer is damaged. Drops the per-row set. */
+  /** Structural change — the whole visible buffer is damaged. Drops the per-row set (both planes). */
   function markAllDirty(): void {
     dirtyAll = true
     dirtyRows.clear()
     dirtyLastAbs = -1
+    if (sigDamageActive) {
+      sigDirtyAll = true
+      sigDirtyRows.clear()
+      sigDirtyLastAbs = -1
+    }
   }
 
   // Decoder for incoming bytes; encoder for string payloads passed to apply().
@@ -1663,6 +1782,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             dirtyRows = shifted
             dirtyLastAbs = -1
           }
+          // Signal plane rebases the same way against its own independent set.
+          if (sigDamageActive && !sigDirtyAll && sigDirtyRows.size > 0) {
+            const shifted = new Set<number>()
+            for (const r of sigDirtyRows) if (r >= over) shifted.add(r - over)
+            sigDirtyRows = shifted
+            sigDirtyLastAbs = -1
+          }
           trimmedRowCount += over
         }
       }
@@ -1676,6 +1802,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         // A line left the screen for history: the shifted rows keep their absolute index (scrollback
         // grew by exactly the shift), so only the freshly-blanked bottom row changed content.
         dirtyScrolled++
+        if (sigDamageActive) sigDirtyScrolled++
         markScreenRowDirty(bottom)
       } else {
         // Alt-screen or scroll-region scroll: no scrollback growth, so content at each absolute
@@ -3755,7 +3882,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     // Fresh world: scrollback wiped, so the damage epoch restarts and the trim origin returns to 0.
     markAllDirty()
     dirtyScrolled = 0
+    if (sigDamageActive) sigDirtyScrolled = 0
     trimmedRowCount = 0
+    // Reactive read plane: a reset changes title/modes/cursor/size and damages the whole buffer.
+    flushSignals()
   }
 
   // ── Observation taps: emit helpers ──
@@ -4152,6 +4282,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     // for the whole applied write. Both are no-ops when their tap has no listener.
     flushPrintRun()
     if (opListeners.size > 0) emitOp({ type: "output", data })
+    // Reactive read plane: coalesce this call's state changes + damage into one batch of emissions.
+    flushSignals()
   }
 
   // ── Resize ──
@@ -4318,6 +4450,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
     // Fire the op tap once for the applied resize (no-op when untapped).
     if (opListeners.size > 0) emitOp({ type: "resize", cols: newCols, rows: newRows })
+    // Reactive read plane: size$/cursor$ may have changed; damage is "all" (reflow).
+    flushSignals()
   }
 
   // ── Snapshot / restore ──
@@ -4509,7 +4643,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     // Whole world replaced (incl. scrollback): restart the damage epoch and trim origin.
     markAllDirty()
     dirtyScrolled = 0
+    if (sigDamageActive) sigDirtyScrolled = 0
     trimmedRowCount = 0
+    // Reactive read plane: a reset changes title/modes/cursor/size and damages the whole buffer.
+    flushSignals()
   }
 
   // ── Accessors ──
@@ -4709,6 +4846,195 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
   }
 
+  // ── Reactive read plane: the signals facade (§4) ──
+  //
+  // Lazily built on first `.signals` access; each signal lazily built on first access to its getter.
+  // `flushSignals` is a no-op until `.signals` is read, and the per-write damage accumulator above is
+  // a no-op until `damage$` has a subscriber (`sigDamageActive`) — so the write core stays
+  // allocation-free while the facade is unused. State signals are computed live and equality-gated at
+  // the flush boundary; `damage$` drains its OWN accumulator (`sigDirty*`), never the pull-plane
+  // `takeDirty()` epoch.
+
+  interface FlushableSignal {
+    flush(): void
+  }
+  const stateFlushSignals: FlushableSignal[] = []
+
+  /**
+   * A state signal (title/modes/cursor/size): `get()` reads live; `subscribe` captures the current
+   * value as its baseline (so only later changes deliver) and `flush()` delivers once per flush
+   * boundary iff the value changed. Registered in `stateFlushSignals` so `flushSignals` visits it.
+   */
+  function makeStateSignal<T>(read: () => T, eq: (a: T, b: T) => boolean): ReadSignal<T> {
+    const listeners = new Set<(value: T) => void>()
+    let last: T = read()
+    const signal: ReadSignal<T> & FlushableSignal = {
+      get: read,
+      subscribe(listener) {
+        // Re-baseline on the 0→1 transition so a fresh subscriber only hears future changes.
+        if (listeners.size === 0) last = read()
+        listeners.add(listener)
+        return () => {
+          listeners.delete(listener)
+        }
+      },
+      flush() {
+        if (listeners.size === 0) return
+        const current = read()
+        if (eq(current, last)) return
+        last = current
+        for (const listener of listeners) listener(current)
+      },
+    }
+    stateFlushSignals.push(signal)
+    return signal
+  }
+
+  function modesNow(): TerminalModes {
+    return {
+      altScreen: useAltScreen,
+      cursorVisible: curVisible,
+      bracketedPaste,
+      applicationCursor,
+      applicationKeypad,
+      autoWrap,
+      mouseTracking,
+      mouseTrackingMode,
+      sgrMouse,
+      utf8Mouse: utf8MouseMode,
+      focusTracking,
+      originMode,
+      insertMode,
+      reverseVideo,
+      syncOutput,
+      leftRightMargin: leftRightMarginMode,
+      colorSchemeReporting,
+      kittyKeyboard: kittyKeyboardFlags > 0,
+      kittyGraphics: hasKittyGraphics,
+      sixel: hasSixel,
+    }
+  }
+
+  function modesEq(a: TerminalModes, b: TerminalModes): boolean {
+    return (
+      a.altScreen === b.altScreen &&
+      a.cursorVisible === b.cursorVisible &&
+      a.bracketedPaste === b.bracketedPaste &&
+      a.applicationCursor === b.applicationCursor &&
+      a.applicationKeypad === b.applicationKeypad &&
+      a.autoWrap === b.autoWrap &&
+      a.mouseTracking === b.mouseTracking &&
+      a.mouseTrackingMode === b.mouseTrackingMode &&
+      a.sgrMouse === b.sgrMouse &&
+      a.utf8Mouse === b.utf8Mouse &&
+      a.focusTracking === b.focusTracking &&
+      a.originMode === b.originMode &&
+      a.insertMode === b.insertMode &&
+      a.reverseVideo === b.reverseVideo &&
+      a.syncOutput === b.syncOutput &&
+      a.leftRightMargin === b.leftRightMargin &&
+      a.colorSchemeReporting === b.colorSchemeReporting &&
+      a.kittyKeyboard === b.kittyKeyboard &&
+      a.kittyGraphics === b.kittyGraphics &&
+      a.sixel === b.sixel
+    )
+  }
+
+  // damage$ is not a makeStateSignal — its value is an accumulated batch, not a live-readable scalar.
+  const damageListeners = new Set<(region: DirtyRegion) => void>()
+  const EMPTY_DAMAGE: DirtyRegion = { rows: new Set(), cursor: false, scrolled: 0 }
+  let damageLast: DirtyRegion = EMPTY_DAMAGE
+  let damageSignal: ReadSignal<DirtyRegion> | undefined
+
+  function getDamageSignal(): ReadSignal<DirtyRegion> {
+    return (damageSignal ??= {
+      get: () => damageLast,
+      subscribe(listener) {
+        if (damageListeners.size === 0) {
+          // Activate the accumulator and baseline it to NOW, so the first batch reflects only
+          // damage produced after this subscription — never rows accrued while inactive.
+          sigDamageActive = true
+          sigDirtyAll = false
+          sigDirtyRows = new Set()
+          sigDirtyScrolled = 0
+          sigDirtyLastAbs = -1
+          sigDirtyCursor = { x: curX, y: curY, visible: curVisible, shape: cursorShape, blinking: cursorBlinking }
+        }
+        damageListeners.add(listener)
+        return () => {
+          damageListeners.delete(listener)
+          if (damageListeners.size === 0) sigDamageActive = false
+        }
+      },
+    })
+  }
+
+  function emitDamageBatch(): void {
+    const cursorChanged =
+      curX !== sigDirtyCursor.x ||
+      curY !== sigDirtyCursor.y ||
+      curVisible !== sigDirtyCursor.visible ||
+      cursorShape !== sigDirtyCursor.shape ||
+      cursorBlinking !== sigDirtyCursor.blinking
+    if (!sigDirtyAll && sigDirtyRows.size === 0 && sigDirtyScrolled === 0 && !cursorChanged) return
+    const region: DirtyRegion = {
+      rows: sigDirtyAll ? "all" : sigDirtyRows,
+      cursor: cursorChanged,
+      scrolled: sigDirtyScrolled,
+    }
+    // Reset the SIGNAL epoch only (the pull-plane takeDirty() epoch is untouched): hand the Set to
+    // subscribers and start a fresh accumulator for the next flush.
+    sigDirtyRows = new Set()
+    sigDirtyAll = false
+    sigDirtyScrolled = 0
+    sigDirtyLastAbs = -1
+    sigDirtyCursor = { x: curX, y: curY, visible: curVisible, shape: cursorShape, blinking: cursorBlinking }
+    damageLast = region
+    for (const listener of damageListeners) listener(region)
+  }
+
+  let signalsFacade: ScreenSignals | undefined
+  let titleSignal: ReadSignal<string> | undefined
+  let modesSignal: ReadSignal<TerminalModes> | undefined
+  let cursorSignal: ReadSignal<Cursor> | undefined
+  let sizeSignal: ReadSignal<Size> | undefined
+
+  function getSignals(): ScreenSignals {
+    return (signalsFacade ??= {
+      get title$() {
+        return (titleSignal ??= makeStateSignal(
+          () => title,
+          (a, b) => a === b,
+        ))
+      },
+      get modes$() {
+        return (modesSignal ??= makeStateSignal(modesNow, modesEq))
+      },
+      get cursor$() {
+        return (cursorSignal ??= makeStateSignal(
+          () => ({ col: curX, row: curY }),
+          (a, b) => a.col === b.col && a.row === b.row,
+        ))
+      },
+      get size$() {
+        return (sizeSignal ??= makeStateSignal(
+          () => ({ cols, rows }),
+          (a, b) => a.cols === b.cols && a.rows === b.rows,
+        ))
+      },
+      get damage$() {
+        return getDamageSignal()
+      },
+    })
+  }
+
+  /** Coalesced end-of-call emission for every accessed signal — the flush boundary (§4). */
+  function flushSignals(): void {
+    if (signalsFacade === undefined) return
+    for (const signal of stateFlushSignals) signal.flush()
+    if (sigDamageActive) emitDamageBatch()
+  }
+
   // Suppress unused variable warnings
   void [mouseTrackingMode, textScale, advancedClipboard]
 
@@ -4718,6 +5044,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     },
     get rows() {
       return rows
+    },
+    get signals() {
+      return getSignals()
     },
     process,
     resize,

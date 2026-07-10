@@ -169,16 +169,69 @@ for (const op of journal) replay.apply(op)
 console.log(replay.serialize() === screen.serialize()) // true
 ```
 
+### Signals — the reactive read plane
+
+`screen.signals` is the third read plane (alongside the pull plane — `getRowAbsolute`/`takeDirty` — and the push plane — `tapOps`/`tapParser`). Five equality-gated **read-signals** turn "poll the engine every frame" into "subscribe and get told when it changes" — they exist to replace a guest's title-diff polling and its DECSET regex scanning:
+
+| Signal    | Value           | Fires when                                                                                                                           |
+| --------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `title$`  | `string`        | the window title (OSC 0/2) changes                                                                                                   |
+| `modes$`  | `TerminalModes` | any DEC/xterm mode flips (alt screen, cursor visibility, bracketed paste, mouse tracking + protocol level, focus, origin, insert, …) |
+| `cursor$` | `Cursor`        | the cursor `{ col, row }` moves                                                                                                      |
+| `size$`   | `Size`          | the screen is resized                                                                                                                |
+| `damage$` | `DirtyRegion`   | every flush, with that flush's BATCHED dirty rows                                                                                    |
+
+Each signal is a minimal, dependency-free shape — vterm.js imports no reactive library, so the interface is exactly:
+
+```typescript
+interface ReadSignal<T> {
+  get(): T // the CURRENT value, read live — never consumes or resets a delivery
+  subscribe(listener: (value: T) => void): () => void // returns an unsubscribe function
+}
+```
+
+A consumer wraps it in `alien-signals`, a zustand store, or React's `useSyncExternalStore` trivially, precisely because the shape is just `{ get, subscribe }`.
+
+**Flush boundary.** Every signal coalesces to **at most one emission per public state-mutating call** (`process` / `apply` / `resize` / `reset` / `restore`; `apply` inherits it via `process`/`resize`). Ten mode flips in one `process()` call deliver **one** `modes$` emission carrying the final set; a paint touching twenty rows delivers **one** `damage$` batch with the union of rows.
+
+**Change-only.** `title$`/`modes$`/`cursor$`/`size$` deliver only when their value actually changed across the call (equality-gated). Subscribing captures the current value as its baseline and does **not** fire immediately — only later changes deliver.
+
+**`damage$` vs `takeDirty()` — two independent epochs.** `damage$` publishes the same `DirtyRegion` shape as `takeDirty()`, but runs on its **own** accumulator. Subscribing to `damage$` never steals or resets the pull-plane `takeDirty()` epoch, so a `damage$` renderer and a `takeDirty()` differ observe the same damage without draining each other. The emitted region (including its `rows` `Set`) is **shared** across all `damage$` subscribers for that flush — treat it as read-only.
+
+**Zero overhead when unused.** Nothing is allocated until `.signals` is first read, each signal is created lazily on first access, and the write core does **no** per-write damage accumulation until `damage$` actually has a subscriber. Listeners are **fail-loud** (a throwing listener propagates out of the write call).
+
+```typescript
+import { createVtermScreen, type DirtyRegion, type TerminalModes } from "vterm.js"
+
+const screen = createVtermScreen({ cols: 80, rows: 24 })
+
+// Replace title polling: told the moment it changes, never on an equal value.
+screen.signals.title$.subscribe((title) => setWindowTitle(title))
+
+// Replace the DECSET regex scanner: the closed mode set, structured.
+screen.signals.modes$.subscribe((m: TerminalModes) => {
+  if (m.altScreen) enterAltScreen()
+  useMouse(m.mouseTracking, m.mouseTrackingMode, m.sgrMouse)
+})
+
+// Frame-batched repaint: one dirty-set per flush, coexisting with any takeDirty() differ.
+screen.signals.damage$.subscribe((d: DirtyRegion) => {
+  if (d.rows === "all") repaintEverything()
+  else for (const row of d.rows) repaintRow(row)
+  if (d.cursor) repaintCursor()
+})
+```
+
 ## Naming — schema migration
 
 The public vocabulary is converging on the terminal domain model (name the thing, not the mechanism; **row = cells, line = text**; flat progressive shapes over discriminated unions). The canonical names below are live now; the old names remain exported as `@deprecated` aliases through the migration window, so existing code keeps compiling.
 
-| Deprecated                       | Canonical            | Notes                                                                 |
-| -------------------------------- | -------------------- | --------------------------------------------------------------------- |
-| `CellColor`                      | `Color`              | Same shape `{ r, g, b, index? }`; a type named `RGB`/`CellColor` carrying `.index` was the smell. |
-| `ScreenSnapshot` / `VtermScreenSnapshot` | `Snapshot`   | The namespace supplies the context; `VtermScreenSnapshot` stays exported as an alias for existing consumers. |
-| `getLine(row): ScreenCell[]`     | `getRow(row)`        | Row = cells; the text readers (`getText`, `getScrollbackText`) keep "line/text". |
-| `getCursorPosition(): {x,y}`     | `getCursor(): Cursor` | `Cursor` is `{ col, row }` — the grid's own vocabulary.               |
+| Deprecated                               | Canonical             | Notes                                                                                                        |
+| ---------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `CellColor`                              | `Color`               | Same shape `{ r, g, b, index? }`; a type named `RGB`/`CellColor` carrying `.index` was the smell.            |
+| `ScreenSnapshot` / `VtermScreenSnapshot` | `Snapshot`            | The namespace supplies the context; `VtermScreenSnapshot` stays exported as an alias for existing consumers. |
+| `getLine(row): ScreenCell[]`             | `getRow(row)`         | Row = cells; the text readers (`getText`, `getScrollbackText`) keep "line/text".                             |
+| `getCursorPosition(): {x,y}`             | `getCursor(): Cursor` | `Cursor` is `{ col, row }` — the grid's own vocabulary.                                                      |
 
 **Deferred (not renamed this slice):** the `Snapshot.cursor` / `Snapshot.savedState` fields keep `x`/`y` rather than `col`/`row`, because those field names are the wire shape read by `encodeScreenSnapshotBinary` — renaming them would silently change the persisted binary format. The `col`/`row` vocabulary is available at the read boundary via `getCursor()` / the `Cursor` type. The snapshot field rename is a codec-format concern for a coordinated schema bump.
 
@@ -195,38 +248,39 @@ The public vocabulary is converging on the terminal domain model (name the thing
 
 ### Screen methods
 
-| Method                         | Description                                            |
-| ------------------------------ | ------------------------------------------------------ |
-| `process(data: Uint8Array)`    | Feed raw terminal data                                 |
-| `apply(op: TerminalOp)`        | Apply one serializable write op (`output` / `resize`)  |
-| `tapOps(listener)`             | Observe applied ops; returns unsubscribe               |
-| `tapParser(listener)`          | Observe parsed VT actions post-apply; returns unsubscribe |
-| `getText()`                    | Get all text (scrollback + screen)                     |
-| `getTextRange(sr, sc, er, ec)` | Get text in a range                                    |
-| `getRow(row)`                  | Get cells for a screen row (row = cells, line = text)  |
-| `getLine(row)`                 | **Deprecated** — alias of `getRow`                     |
-| `getCell(row, col)`            | Get a single cell                                      |
-| `getCursor()`                  | Get cursor `{ col, row }`                              |
-| `getCursorPosition()`          | **Deprecated** — cursor `{ x, y }`; use `getCursor()`  |
-| `getCursorVisible()`           | Check cursor visibility                                |
-| `getCursorShape()`             | Get cursor shape: `"block"`, `"underline"`, or `"bar"` |
-| `getCursorBlinking()`          | Check if cursor is blinking                            |
-| `getMode(mode)`                | Check terminal mode                                    |
-| `getTitle()`                   | Get window title                                       |
-| `getScrollbackLength()`        | Number of scrollback lines                             |
-| `getViewportOffset()`          | Current viewport scroll offset                         |
-| `scrollViewport(delta)`        | Scroll viewport                                        |
-| `totalRows()`                  | Buffer height: retained scrollback + screen            |
-| `screenRows()`                 | Visible screen row count                               |
-| `viewportTop()`                | Absolute row where the viewport's top line sits        |
-| `getRowAbsolute(row)`          | Cells at an ABSOLUTE row (0 = oldest retained line)    |
-| `firstRetainedRow()`           | Global index of retained row 0 (lines trimmed so far)  |
-| `takeDirty()`                  | Take + reset accumulated per-row damage (pull plane)   |
-| `resize(cols, rows)`           | Resize terminal                                        |
-| `reset()`                      | Reset to initial state                                 |
-| `snapshot()`                   | Capture serializable T0-T3 terminal state              |
-| `restore(snapshot)`            | Restore a snapshot captured from `snapshot()`          |
-| `serialize(options?)`          | Re-encode current state as minimal ANSI a fresh same-size terminal can replay |
+| Method                         | Description                                                                              |
+| ------------------------------ | ---------------------------------------------------------------------------------------- |
+| `process(data: Uint8Array)`    | Feed raw terminal data                                                                   |
+| `apply(op: TerminalOp)`        | Apply one serializable write op (`output` / `resize`)                                    |
+| `tapOps(listener)`             | Observe applied ops; returns unsubscribe                                                 |
+| `tapParser(listener)`          | Observe parsed VT actions post-apply; returns unsubscribe                                |
+| `signals`                      | Reactive read plane: `title$`/`modes$`/`cursor$`/`size$`/`damage$` (lazy, zero-overhead) |
+| `getText()`                    | Get all text (scrollback + screen)                                                       |
+| `getTextRange(sr, sc, er, ec)` | Get text in a range                                                                      |
+| `getRow(row)`                  | Get cells for a screen row (row = cells, line = text)                                    |
+| `getLine(row)`                 | **Deprecated** — alias of `getRow`                                                       |
+| `getCell(row, col)`            | Get a single cell                                                                        |
+| `getCursor()`                  | Get cursor `{ col, row }`                                                                |
+| `getCursorPosition()`          | **Deprecated** — cursor `{ x, y }`; use `getCursor()`                                    |
+| `getCursorVisible()`           | Check cursor visibility                                                                  |
+| `getCursorShape()`             | Get cursor shape: `"block"`, `"underline"`, or `"bar"`                                   |
+| `getCursorBlinking()`          | Check if cursor is blinking                                                              |
+| `getMode(mode)`                | Check terminal mode                                                                      |
+| `getTitle()`                   | Get window title                                                                         |
+| `getScrollbackLength()`        | Number of scrollback lines                                                               |
+| `getViewportOffset()`          | Current viewport scroll offset                                                           |
+| `scrollViewport(delta)`        | Scroll viewport                                                                          |
+| `totalRows()`                  | Buffer height: retained scrollback + screen                                              |
+| `screenRows()`                 | Visible screen row count                                                                 |
+| `viewportTop()`                | Absolute row where the viewport's top line sits                                          |
+| `getRowAbsolute(row)`          | Cells at an ABSOLUTE row (0 = oldest retained line)                                      |
+| `firstRetainedRow()`           | Global index of retained row 0 (lines trimmed so far)                                    |
+| `takeDirty()`                  | Take + reset accumulated per-row damage (pull plane)                                     |
+| `resize(cols, rows)`           | Resize terminal                                                                          |
+| `reset()`                      | Reset to initial state                                                                   |
+| `snapshot()`                   | Capture serializable T0-T3 terminal state                                                |
+| `restore(snapshot)`            | Restore a snapshot captured from `snapshot()`                                            |
+| `serialize(options?)`          | Re-encode current state as minimal ANSI a fresh same-size terminal can replay            |
 
 ### Cell properties
 
@@ -324,11 +378,11 @@ allocation), and structural changes drop the set for the `"all"` sentinel.
 const { rows, cursor, scrolled } = screen.takeDirty()
 ```
 
-| Field      | Type                    | Meaning                                                                 |
-| ---------- | ----------------------- | ----------------------------------------------------------------------- |
-| `rows`     | `Set<number> \| "all"`  | Changed rows as ABSOLUTE indices, or `"all"` on structural change       |
-| `cursor`   | `boolean`               | Cursor position / visibility / shape / blink changed since last take    |
-| `scrolled` | `number`                | Lines that entered scrollback since last take                           |
+| Field      | Type                   | Meaning                                                              |
+| ---------- | ---------------------- | -------------------------------------------------------------------- |
+| `rows`     | `Set<number> \| "all"` | Changed rows as ABSOLUTE indices, or `"all"` on structural change    |
+| `cursor`   | `boolean`              | Cursor position / visibility / shape / blink changed since last take |
+| `scrolled` | `number`               | Lines that entered scrollback since last take                        |
 
 `rows` is `"all"` on resize, full clear (ED 2/3), alt-screen switch, `reset()`, and
 `restore()`. The returned `Set` is **owned by the caller** — the engine keeps a fresh
@@ -338,6 +392,8 @@ increments, so a scrollback-preserving renderer shifts its viewport by `scrolled
 repaints just `rows`. `rows` indices are valid against the buffer at take time; if a
 take spanned a trim (`firstRetainedRow()` increased), rebase any cached indices by the
 delta.
+
+The **reactive** counterpart is `signals.damage$` (see [Signals](#signals--the-reactive-read-plane)) — the same `DirtyRegion` shape delivered per-flush to subscribers. It runs on an accumulator **independent** of `takeDirty()`, so a push-style `damage$` renderer and a pull-style `takeDirty()` differ coexist without draining each other's epoch.
 
 ## vs vt100.js
 
