@@ -643,6 +643,18 @@ describe("serializeSnapshot — mode emission", () => {
     expect(sink.getText()).toBe(source.getText())
   })
 
+  test("restored primary row re-enters scrollback after alt exit and later scroll", () => {
+    const source = mkScreen(12, 3)
+    feed(source, "restored-row\r\n")
+    feed(source, `${ESC}[?1049hALT${ESC}[?1049l`)
+    feed(source, "diagnostic-wrap-diagnostic-wrap-diagnostic-wrap\r\n")
+
+    const sink = roundTripState(source, 12, 3)
+    expect(sink.getScrollbackText()).toContain("restored-row")
+    expect(sink.getScrollbackText()).toContain("diagnostic")
+    expect(sink.getScrollbackText()).toBe(source.getScrollbackText())
+  })
+
   test("golden 7: syncOutput is NEVER emitted (?2026h would wedge a real receiver)", () => {
     const source = mkScreen(20, 3)
     feed(source, "x")
