@@ -175,6 +175,25 @@ describe("dirty tracking", () => {
     expect(s.getScrollbackText()).toContain("diagnostic")
   })
 
+  test("a wrapped restored primary row still enters scrollback after literal ?1049l restore and later scroll", () => {
+    const s = mkScreen(12, 3)
+    s.takeDirty()
+    feed(s, "restored-row\r\n")
+    feed(s, `${ESC}[?1049hALT${ESC}[?1049l`)
+    s.takeDirty()
+
+    // The seam reported on 2026-07-11 was path-sensitive: a long wrapped
+    // primary diagnostic could scroll while the restored row itself never
+    // re-entered scrollback. Keep the repro literal so the ownership layer
+    // owns the restored-row contract, not a synthetic shorthand.
+    feed(s, `diagnostic-wrap-`.repeat(8) + `\r\n`)
+
+    const dirty = asSet(s.takeDirty())
+    expect([...dirty]).toContain(0)
+    expect(s.getScrollbackText()).toContain("restored-row")
+    expect(s.getScrollbackText()).toContain("diagnostic")
+  })
+
   test("scrolled counts lines entering scrollback", () => {
     const s = mkScreen(40, 2)
     s.takeDirty()

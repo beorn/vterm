@@ -1630,6 +1630,19 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
   }
 
+  function markAbsoluteRowDirty(abs: number): void {
+    // Pull plane (always on).
+    if (!dirtyAll && abs !== dirtyLastAbs) {
+      dirtyLastAbs = abs
+      dirtyRows.add(abs)
+    }
+    // Signal plane (only while damage$ is subscribed) — its own epoch, own collapse cursor.
+    if (sigDamageActive && !sigDirtyAll && abs !== sigDirtyLastAbs) {
+      sigDirtyLastAbs = abs
+      sigDirtyRows.add(abs)
+    }
+  }
+
   function markScreenRowsDirty(top: number, bottom: number): void {
     if (dirtyAll && (!sigDamageActive || sigDirtyAll)) return
     for (let r = top; r <= bottom; r++) markScreenRowDirty(r)
@@ -1771,6 +1784,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       if (enteredScrollback) {
         scrollback.push(grid[0]!)
         scrollbackSoftWrapped.push(softWrapped[0] ?? false)
+        markAbsoluteRowDirty(scrollback.length - 1)
         if (scrollback.length > scrollbackLimit * 2) {
           const over = scrollback.length - scrollbackLimit
           scrollback.splice(0, over)
