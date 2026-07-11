@@ -225,6 +225,18 @@ describe("snapshot-codec — round-trip deep equality", () => {
     expect(decoded.alt.grid[0]!.map((c) => c.char).join("")).toContain("ALT")
   })
 
+  test("restored primary content still re-enters scrollback after the primary screen scrolls again", () => {
+    const screen = mkScreen(12, 3)
+    feed(screen, "restored-row\r\n")
+    feed(screen, `${ESC}[?1049hALT${ESC}[?1049l`)
+    feed(screen, "diagnostic-wrap-diagnostic-wrap-diagnostic-wrap\r\n")
+
+    const decoded = roundTrip(screen.snapshot())
+    const scrollbackText = decoded.scrollback.map((row) => row.map((cell) => cell.char || " ").join("")).join("\n")
+    expect(scrollbackText).toContain("restored-row")
+    expect(scrollbackText).toContain("diagnostic")
+  })
+
   test("scrollback with soft-wrap bits round-trips (parallel arrays intact)", () => {
     const screen = mkScreen(10, 3, 2000)
     feed(screen, "A".repeat(25)) // wraps across rows → soft-wrap bits set

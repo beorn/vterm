@@ -162,6 +162,19 @@ describe("dirty tracking", () => {
     expect(s.takeDirty().rows).toBe("all")
   })
 
+  test("a restored primary row enters scrollback after the primary screen scrolls again", () => {
+    const s = mkScreen(12, 3)
+    feed(s, "restored-row\r\n")
+    feed(s, `${ESC}[?1049hALT${ESC}[?1049l`)
+
+    // Once the primary screen is restored, a wrapped diagnostic on the raw PTY
+    // stream must be able to push that restored row into scrollback again.
+    feed(s, `diagnostic-wrap-diagnostic-wrap-diagnostic-wrap\r\n`)
+
+    expect(s.getScrollbackText()).toContain("restored-row")
+    expect(s.getScrollbackText()).toContain("diagnostic")
+  })
+
   test("scrolled counts lines entering scrollback", () => {
     const s = mkScreen(40, 2)
     s.takeDirty()
