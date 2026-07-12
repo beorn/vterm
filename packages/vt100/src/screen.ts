@@ -78,6 +78,7 @@ export interface Screen {
   reset(): void
   getCell(row: number, col: number): ScreenCell
   getLine(row: number): ScreenCell[]
+  getScrollbackLine(row: number): ScreenCell[]
   getText(): string
   getTextRange(startRow: number, startCol: number, endRow: number, endCol: number): string
   getCursorPosition(): { x: number; y: number }
@@ -736,6 +737,12 @@ export function createScreen(opts: ScreenOptions): Screen {
     return r.map((cell) => ({ ...cell }))
   }
 
+  function getScrollbackLine(row: number): ScreenCell[] {
+    const r = scrollback[row]
+    if (!r) return makeRow(cols)
+    return r.map((cell) => ({ ...cell }))
+  }
+
   function getText(): string {
     const lines: string[] = []
 
@@ -818,6 +825,7 @@ export function createScreen(opts: ScreenOptions): Screen {
     reset: fullReset,
     getCell,
     getLine,
+    getScrollbackLine,
     getText,
     getTextRange,
     getCursorPosition: () => ({ x: curX, y: curY }),
