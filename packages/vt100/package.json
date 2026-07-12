@@ -1,6 +1,6 @@
 {
   "name": "vt100.js",
-  "version": "0.1.2",
+  "version": "0.4.0",
   "description": "VT100 terminal emulator — monochrome, cursor, scroll regions. Pure TypeScript, zero dependencies.",
   "keywords": [
     "ansi",
@@ -28,13 +28,13 @@
     ".": "./src/index.ts"
   },
   "publishConfig": {
-    "access": "public",
     "exports": {
       ".": {
         "types": "./dist/index.d.mts",
         "import": "./dist/index.mjs"
       }
-    }
+    },
+    "access": "public"
   },
   "tsdown": {
     "clean": true,

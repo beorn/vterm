@@ -1,6 +1,6 @@
 {
   "name": "vt220.js",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "VT220 terminal emulator — 8 colors, insert/delete, selective erase. Pure TypeScript, zero dependencies.",
   "keywords": [
     "ansi",
@@ -28,13 +28,13 @@
     ".": "./src/index.ts"
   },
   "publishConfig": {
-    "access": "public",
     "exports": {
       ".": {
         "types": "./dist/index.d.mts",
         "import": "./dist/index.mjs"
       }
-    }
+    },
+    "access": "public"
   },
   "tsdown": {
     "clean": true,
