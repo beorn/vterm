@@ -19,8 +19,9 @@
   },
   "devDependencies": {
     "oxfmt": "0.38.0",
-    "tsdown": "^0.21.7",
-    "vitest": "^4.1.1"
+    "tsdown": "^0.22.5",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
   },
   "engines": {
     "node": ">=23.6.0"
