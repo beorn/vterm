@@ -106,9 +106,7 @@ function stateView(snap: VtermScreenSnapshot): Record<string, unknown> {
     // The LAST index is masked on both sides: a true bit there says the final
     // history row wraps INTO visible screen row 0 — a linkage the positioned
     // paint severs by design (a paint is not a flow), so it cannot round-trip.
-    scrollbackSoftWrapped: snap.scrollbackSoftWrapped?.map((bit, i, arr) =>
-      i === arr.length - 1 ? false : bit,
-    ),
+    scrollbackSoftWrapped: snap.scrollbackSoftWrapped?.map((bit, i, arr) => (i === arr.length - 1 ? false : bit)),
     colors: {
       defaultFgColor: snap.colors.current.defaultFgColor,
       defaultBgColor: snap.colors.current.defaultBgColor,
@@ -126,9 +124,7 @@ function roundTripState(source: VtermScreen, cols: number, rows: number): VtermS
 
   for (let row = 0; row < rows; row++) {
     for (let col = 0; col < cols; col++) {
-      expect(cellView(sink.getCell(row, col)), `cell (${row},${col})`).toEqual(
-        cellView(source.getCell(row, col)),
-      )
+      expect(cellView(sink.getCell(row, col)), `cell (${row},${col})`).toEqual(cellView(source.getCell(row, col)))
     }
   }
   expect(sink.getCursorPosition(), "cursor position").toEqual(source.getCursorPosition())
@@ -162,23 +158,80 @@ function randomSource(rand: () => number, cols: number, rows: number): VtermScre
   const pick = <T>(items: readonly T[]): T => items[Math.floor(rand() * items.length)]!
   const int = (max: number): number => Math.floor(rand() * max)
   const sgrPool = [
-    "0", "1", "2", "3", "4", "4:2", "4:3", "4:4", "4:5", "5", "7", "8", "9", "53",
-    "22", "23", "24", "25", "27", "29", "55",
-    "31", "42", "93", "104", "39", "49",
-    "38;2;200;40;120", "48;2;10;90;230", "38;5;178", "48;5;24", "58;2;250;250;60", "59",
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "4:2",
+    "4:3",
+    "4:4",
+    "4:5",
+    "5",
+    "7",
+    "8",
+    "9",
+    "53",
+    "22",
+    "23",
+    "24",
+    "25",
+    "27",
+    "29",
+    "55",
+    "31",
+    "42",
+    "93",
+    "104",
+    "39",
+    "49",
+    "38;2;200;40;120",
+    "48;2;10;90;230",
+    "38;5;178",
+    "48;5;24",
+    "58;2;250;250;60",
+    "59",
   ] as const
   const words = ["hei", "verden", "汉字", "🎈", "ab c", "x", "…tail"] as const
   const modePool = [
-    `${ESC}[?6h`, `${ESC}[?6l`, `${ESC}[4h`, `${ESC}[4l`, `${ESC}[?5h`, `${ESC}[?1h`,
-    `${ESC}=`, `${ESC}>`, `${ESC}[?2004h`, `${ESC}[?1004h`, `${ESC}[?1007h`,
-    `${ESC}[?2031h`, `${ESC}[?1000h`, `${ESC}[?1003h`, `${ESC}[?1016h`, `${ESC}[?1000l`,
-    `${ESC}[?1006h`, `${ESC}[?1005h`, `${ESC}[=5u`, `${ESC}[>13u`, `${ESC}[<u`,
-    `${ESC}[2;4r`, `${ESC}[r`, `${ESC}[?69h${ESC}[2;10s`, `${ESC}[?69l`,
-    `${ESC}[3 q`, `${ESC}[2 q`, `${ESC}[0 q`, `${ESC}(0`, `${ESC}(B`,
-    `${ESC}[?1049h`, `${ESC}[?1049l`,
-    `${ESC}]10;rgb:aa/bb/cc${ESC}\\`, `${ESC}]11;#204060${ESC}\\`, `${ESC}]110${ESC}\\`,
+    `${ESC}[?6h`,
+    `${ESC}[?6l`,
+    `${ESC}[4h`,
+    `${ESC}[4l`,
+    `${ESC}[?5h`,
+    `${ESC}[?1h`,
+    `${ESC}=`,
+    `${ESC}>`,
+    `${ESC}[?2004h`,
+    `${ESC}[?1004h`,
+    `${ESC}[?1007h`,
+    `${ESC}[?2031h`,
+    `${ESC}[?1000h`,
+    `${ESC}[?1003h`,
+    `${ESC}[?1016h`,
+    `${ESC}[?1000l`,
+    `${ESC}[?1006h`,
+    `${ESC}[?1005h`,
+    `${ESC}[=5u`,
+    `${ESC}[>13u`,
+    `${ESC}[<u`,
+    `${ESC}[2;4r`,
+    `${ESC}[r`,
+    `${ESC}[?69h${ESC}[2;10s`,
+    `${ESC}[?69l`,
+    `${ESC}[3 q`,
+    `${ESC}[2 q`,
+    `${ESC}[0 q`,
+    `${ESC}(0`,
+    `${ESC}(B`,
+    `${ESC}[?1049h`,
+    `${ESC}[?1049l`,
+    `${ESC}]10;rgb:aa/bb/cc${ESC}\\`,
+    `${ESC}]11;#204060${ESC}\\`,
+    `${ESC}]110${ESC}\\`,
     `${ESC}]4;100;rgb:11/22/33${ESC}\\`,
-    `${ESC}H`, `${ESC}[3g`,
+    `${ESC}H`,
+    `${ESC}[3g`,
   ] as const
   const opCount = 24 + int(24)
   for (let i = 0; i < opCount; i++) {
@@ -516,9 +569,7 @@ describe("scrollback soft-wrap bits — the model add", () => {
     const legacy = { ...snap, scrollbackSoftWrapped: undefined }
     const old = mkScreen(10, 3)
     old.restore(legacy as unknown as VtermScreenSnapshot)
-    expect(old.snapshot().scrollbackSoftWrapped).toEqual(
-      new Array(snap.scrollback.length).fill(false),
-    )
+    expect(old.snapshot().scrollbackSoftWrapped).toEqual(new Array(snap.scrollback.length).fill(false))
   })
 
   test("serialized history preserves wrap linkage: a rewrapped logical line stays one line", () => {
@@ -537,11 +588,7 @@ describe("scrollback soft-wrap bits — the model add", () => {
 
 describe("serializeSnapshot — mode emission", () => {
   /** One entry per emitted mode family (bead golden 9 — the reattach matrix). */
-  const MODE_MATRIX: readonly (readonly [
-    name: string,
-    setup: string,
-    check: (snap: VtermScreenSnapshot) => void,
-  ])[] = [
+  const MODE_MATRIX: readonly (readonly [name: string, setup: string, check: (snap: VtermScreenSnapshot) => void])[] = [
     ["origin ?6", `${ESC}[?6h`, (m) => expect(m.modes.origin).toBe(true)],
     ["insert IRM 4", `${ESC}[4h`, (m) => expect(m.modes.insert).toBe(true)],
     ["reverse ?5", `${ESC}[?5h`, (m) => expect(m.modes.reverseVideo).toBe(true)],
