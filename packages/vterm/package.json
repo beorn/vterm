@@ -1,6 +1,6 @@
 {
   "name": "vterm.js",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Modern terminal emulator — full VT/ECMA-48/xterm standards coverage. Pure TypeScript, zero dependencies.",
   "keywords": [
     "ansi",
@@ -27,6 +27,8 @@
     "dist"
   ],
   "type": "module",
+  "main": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
   "exports": {
     ".": "./src/index.ts"
   },
