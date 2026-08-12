@@ -23,13 +23,7 @@
  * and parser/pending-wrap/mid-parse state are unserializable-to-VT by design.
  */
 import { describe, expect, test } from "vitest"
-import {
-  createVtermScreen,
-  serializeSnapshot,
-  type ScreenCell,
-  type VtermScreen,
-  type Snapshot,
-} from "../src/index.ts"
+import { createVtermScreen, serializeSnapshot, type ScreenCell, type VtermScreen, type Snapshot } from "../src/index.ts"
 
 const ESC = "\x1b"
 const encoder = new TextEncoder()
