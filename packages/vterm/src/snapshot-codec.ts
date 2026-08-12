@@ -1,7 +1,7 @@
 /**
- * snapshot-codec.ts — compact binary codec for {@link ScreenSnapshot}.
+ * snapshot-codec.ts — compact binary codec for {@link Snapshot}.
  *
- * Why: a keyed-JSON ScreenSnapshot spends 220-280 bytes per cell — every cell is a
+ * Why: a keyed-JSON Snapshot spends 220-280 bytes per cell — every cell is a
  * 15-key object with two-or-three nested `{r,g,b}` color records. A 200x50 screen with
  * a 10k-row scrollback is ~2M cells → ~450 MB once `JSON.stringify`'d, which is exactly
  * what a hab checkpoint pays when it stringifies the whole terminal at shutdown /
@@ -55,7 +55,7 @@
  *     that disagrees with the grid geometry, or an unknown version all throw.
  */
 
-import type { CellColor, ScreenCell, ScreenSnapshot, UnderlineStyle } from "./screen.ts"
+import type { Color, ScreenCell, Snapshot, UnderlineStyle } from "./screen.ts"
 
 const VERSION = 1
 
@@ -100,21 +100,21 @@ interface SnapshotHeader {
   cols: number
   rows: number
   scrollbackLimit: number
-  activeBuffer: ScreenSnapshot["activeBuffer"]
-  cursor: ScreenSnapshot["cursor"]
-  savedState: ScreenSnapshot["savedState"]
-  attrs: ScreenSnapshot["attrs"]
-  modes: ScreenSnapshot["modes"]
-  margins: ScreenSnapshot["margins"]
-  colors: ScreenSnapshot["colors"]
+  activeBuffer: Snapshot["activeBuffer"]
+  cursor: Snapshot["cursor"]
+  savedState: Snapshot["savedState"]
+  attrs: Snapshot["attrs"]
+  modes: Snapshot["modes"]
+  margins: Snapshot["margins"]
+  colors: Snapshot["colors"]
   tabStops: number[]
   title: string
   clipboard: string
   cwd: string
   notifications: string[]
   viewportOffset: number
-  parser: ScreenSnapshot["parser"]
-  unicode: ScreenSnapshot["unicode"]
+  parser: Snapshot["parser"]
+  unicode: Snapshot["unicode"]
 }
 
 // ── Byte writer (growable) ─────────────────────────────────────────────
@@ -323,7 +323,7 @@ function readBits(r: Reader, count: number): boolean[] {
 
 interface Interner {
   stringList: string[]
-  colorList: CellColor[]
+  colorList: Color[]
   styleList: StyleTuple[]
   internString(s: string): number
   internStyle(cell: ScreenCell): number
@@ -338,7 +338,7 @@ function checkByte(name: string, value: number): void {
 function createInterner(): Interner {
   const stringList: string[] = [""]
   const stringMap = new Map<string, number>([["", 0]])
-  const colorList: CellColor[] = []
+  const colorList: Color[] = []
   const colorMap = new Map<string, number>()
   const styleList: StyleTuple[] = []
   const styleMap = new Map<string, number>()
@@ -354,7 +354,7 @@ function createInterner(): Interner {
   }
 
   /** null → 0; otherwise color-table index + 1. */
-  function colorRef(c: CellColor | null): number {
+  function colorRef(c: Color | null): number {
     if (c === null) return 0
     checkByte("color.r", c.r)
     checkByte("color.g", c.g)
@@ -470,7 +470,7 @@ function writeStringTable(w: Writer, list: string[]): void {
   }
 }
 
-function writeColorTable(w: Writer, list: CellColor[]): void {
+function writeColorTable(w: Writer, list: Color[]): void {
   w.varint(list.length)
   for (const c of list) {
     w.u8(c.r)
@@ -502,9 +502,9 @@ function readStringTable(r: Reader): string[] {
   return list
 }
 
-function readColorTable(r: Reader): CellColor[] {
+function readColorTable(r: Reader): Color[] {
   const count = r.varint()
-  const list = new Array<CellColor>(count)
+  const list = new Array<Color>(count)
   for (let i = 0; i < count; i++) {
     const cr = r.u8()
     const cg = r.u8()
@@ -532,7 +532,7 @@ function readStyleTable(r: Reader): StyleTuple[] {
 
 // ── Cell decoding ──────────────────────────────────────────────────────
 
-function colorFromRef(ref: number, table: CellColor[]): CellColor | null {
+function colorFromRef(ref: number, table: Color[]): Color | null {
   if (ref === 0) return null
   const c = table[ref - 1]
   if (c === undefined) {
@@ -545,7 +545,7 @@ function makeCell(
   charIdx: number,
   styleIdx: number,
   strings: string[],
-  colors: CellColor[],
+  colors: Color[],
   styles: StyleTuple[],
 ): ScreenCell {
   const char = strings[charIdx]
@@ -601,7 +601,7 @@ function readGridSection(
   softWrapNullable: boolean,
   expected: { rows: number; cols: number } | null,
   strings: string[],
-  colors: CellColor[],
+  colors: Color[],
   styles: StyleTuple[],
 ): DecodedGrid {
   const rowCount = r.varint()
@@ -659,10 +659,10 @@ function readGridSection(
 // ── Public API ─────────────────────────────────────────────────────────
 
 /**
- * Encode a {@link ScreenSnapshot} to a compact binary buffer. Output is
+ * Encode a {@link Snapshot} to a compact binary buffer. Output is
  * deterministic for identical input and decodes back to a deep-equal snapshot.
  */
-export function encodeScreenSnapshotBinary(snapshot: ScreenSnapshot): Uint8Array {
+export function encodeScreenSnapshotBinary(snapshot: Snapshot): Uint8Array {
   const w = createWriter()
   w.u8(VERSION)
 
@@ -710,10 +710,10 @@ export function encodeScreenSnapshotBinary(snapshot: ScreenSnapshot): Uint8Array
 
 /**
  * Decode a buffer produced by {@link encodeScreenSnapshotBinary} back into a
- * {@link ScreenSnapshot}. Throws loudly on an unknown version byte, truncated
+ * {@link Snapshot}. Throws loudly on an unknown version byte, truncated
  * input, or any internal inconsistency — never returns a partial/normalized result.
  */
-export function decodeScreenSnapshotBinary(bytes: Uint8Array): ScreenSnapshot {
+export function decodeScreenSnapshotBinary(bytes: Uint8Array): Snapshot {
   const r = createReader(bytes)
 
   const version = r.u8()
@@ -733,7 +733,7 @@ export function decodeScreenSnapshotBinary(bytes: Uint8Array): ScreenSnapshot {
   const alt = readGridSection(r, false, geom, strings, colors, styles)
   const scrollback = readGridSection(r, true, null, strings, colors, styles)
 
-  const result: ScreenSnapshot = {
+  const result: Snapshot = {
     version: 1,
     cols: header.cols,
     rows: header.rows,

@@ -1,13 +1,15 @@
 import { describe, test, expect } from "vitest"
-import {
-  createVtermScreen,
-  type VtermScreenSnapshot,
-  type Snapshot,
-  type Color,
-  type Cursor,
-  type CellColor,
-  type ScreenSnapshot,
-} from "../src/index.ts"
+import { createVtermScreen, type Snapshot, type Color, type Cursor } from "../src/index.ts"
+
+// Type-level proof the §9 migration window is over: these names no longer resolve.
+// Each import errors (TS2305/TS2724 — "has no exported member"); if a name is ever
+// re-added, the now-unneeded @ts-expect-error itself becomes a typecheck failure.
+// @ts-expect-error — CellColor was deleted (§9 naming ruling); only Color is exported.
+import type { CellColor as _CellColor } from "../src/index.ts"
+// @ts-expect-error — ScreenSnapshot was deleted (§9 naming ruling); only Snapshot is exported.
+import type { ScreenSnapshot as _ScreenSnapshot } from "../src/index.ts"
+// @ts-expect-error — VtermScreenSnapshot was deleted (§9 naming ruling); only Snapshot is exported.
+import type { VtermScreenSnapshot as _VtermScreenSnapshot } from "../src/index.ts"
 
 const enc = new TextEncoder()
 
@@ -19,43 +21,40 @@ function screenWith(input: string, opts?: Parameters<typeof createVtermScreen>[0
 }
 
 // ═══════════════════════════════════════════════════════
-// §9 naming ruling — canonical names + deprecated aliases
+// §9 naming ruling — canonical names only (aliases deleted)
 // ═══════════════════════════════════════════════════════
 
 describe("§9 naming ruling", () => {
-  test("getRow returns cells and matches deprecated getLine", () => {
+  test("getRow returns cells (row = cells, line = text)", () => {
     const screen = screenWith("\x1b[1mHi\x1b[0m")
     const row = screen.getRow(0)
     expect(row[0]?.char).toBe("H")
     expect(row[0]?.bold).toBe(true)
-    expect(screen.getRow(0)).toEqual(screen.getLine(0))
   })
 
-  test("getCursor returns {col,row}; getCursorPosition still returns {x,y}", () => {
+  test("getCursor returns {col,row}", () => {
     const screen = screenWith("hello")
     expect(screen.getCursor()).toEqual({ col: 5, row: 0 })
-    const legacy = screen.getCursorPosition()
-    expect({ col: legacy.x, row: legacy.y }).toEqual(screen.getCursor())
   })
 
-  test("Color is the canonical shape; CellColor alias resolves to it", () => {
+  test("Color is the canonical shape", () => {
     const screen = screenWith("\x1b[38;2;255;100;0mX\x1b[0m")
     const c: Color | null = screen.getRow(0)[0]?.fg ?? null
     expect(c).toEqual({ r: 255, g: 100, b: 0 })
-    // CellColor is a structural alias of Color — assignable both directions.
-    const asCell: CellColor | null = c
-    const asColor: Color | null = asCell
-    expect(asColor).toEqual(c)
   })
 
-  test("Snapshot is canonical; ScreenSnapshot / VtermScreenSnapshot aliases interchange", () => {
+  test("Snapshot is the canonical persist/restore value", () => {
     const screen = screenWith("world")
     const snap: Snapshot = screen.snapshot()
-    const asLegacy: ScreenSnapshot = snap
-    const asVterm: VtermScreenSnapshot = asLegacy
     const restored = createVtermScreen({ cols: snap.cols, rows: snap.rows })
-    restored.restore(asVterm)
+    restored.restore(snap)
     expect(restored.getText()).toBe(screen.getText())
+  })
+
+  test("the deprecated methods are gone from the runtime object", () => {
+    const screen = screenWith("x") as unknown as Record<string, unknown>
+    expect(screen.getLine).toBeUndefined()
+    expect(screen.getCursorPosition).toBeUndefined()
   })
 })
 
@@ -78,7 +77,7 @@ describe("vterm screen", () => {
 
   test("cursor starts at origin", () => {
     const screen = createVtermScreen()
-    expect(screen.getCursorPosition()).toEqual({ x: 0, y: 0 })
+    expect(screen.getCursor()).toEqual({ col: 0, row: 0 })
   })
 
   test("cursor is visible by default", () => {
@@ -95,7 +94,7 @@ describe("vterm screen", () => {
     const screen = createVtermScreen()
     screen.process(enc.encode("hello"))
     screen.reset()
-    expect(screen.getCursorPosition()).toEqual({ x: 0, y: 0 })
+    expect(screen.getCursor()).toEqual({ col: 0, row: 0 })
     expect(screen.getTitle()).toBe("")
   })
 
@@ -119,37 +118,37 @@ describe("vterm screen", () => {
 describe("text writing", () => {
   test("writes text and advances cursor", () => {
     const screen = screenWith("hello")
-    expect(screen.getCursorPosition()).toEqual({ x: 5, y: 0 })
+    expect(screen.getCursor()).toEqual({ col: 5, row: 0 })
     expect(screen.getCell(0, 0).char).toBe("h")
     expect(screen.getCell(0, 4).char).toBe("o")
   })
 
   test("newline moves cursor down", () => {
     const screen = screenWith("hello\r\nworld")
-    expect(screen.getCursorPosition()).toEqual({ x: 5, y: 1 })
+    expect(screen.getCursor()).toEqual({ col: 5, row: 1 })
     expect(screen.getCell(1, 0).char).toBe("w")
   })
 
   test("carriage return moves cursor to start", () => {
     const screen = screenWith("hello\rworld")
-    expect(screen.getCursorPosition()).toEqual({ x: 5, y: 0 })
+    expect(screen.getCursor()).toEqual({ col: 5, row: 0 })
     expect(screen.getCell(0, 0).char).toBe("w")
   })
 
   test("backspace moves cursor back", () => {
     const screen = screenWith("ab\x08")
-    expect(screen.getCursorPosition()).toEqual({ x: 1, y: 0 })
+    expect(screen.getCursor()).toEqual({ col: 1, row: 0 })
   })
 
   test("tab advances to next tab stop", () => {
     const screen = screenWith("a\t")
-    expect(screen.getCursorPosition().x).toBe(8)
+    expect(screen.getCursor().col).toBe(8)
   })
 
   test("autowrap wraps at end of line", () => {
     const screen = createVtermScreen({ cols: 5, rows: 3 })
     screen.process(enc.encode("123456"))
-    expect(screen.getCursorPosition()).toEqual({ x: 1, y: 1 })
+    expect(screen.getCursor()).toEqual({ col: 1, row: 1 })
     expect(screen.getCell(1, 0).char).toBe("6")
   })
 })
@@ -161,52 +160,52 @@ describe("text writing", () => {
 describe("cursor movement", () => {
   test("CUP moves cursor to position", () => {
     const screen = screenWith("\x1b[5;10H")
-    expect(screen.getCursorPosition()).toEqual({ x: 9, y: 4 })
+    expect(screen.getCursor()).toEqual({ col: 9, row: 4 })
   })
 
   test("CUU moves cursor up", () => {
     const screen = screenWith("\x1b[5;1H\x1b[2A")
-    expect(screen.getCursorPosition()).toEqual({ x: 0, y: 2 })
+    expect(screen.getCursor()).toEqual({ col: 0, row: 2 })
   })
 
   test("CUD moves cursor down", () => {
     const screen = screenWith("\x1b[2B")
-    expect(screen.getCursorPosition()).toEqual({ x: 0, y: 2 })
+    expect(screen.getCursor()).toEqual({ col: 0, row: 2 })
   })
 
   test("CUF moves cursor forward", () => {
     const screen = screenWith("\x1b[5C")
-    expect(screen.getCursorPosition()).toEqual({ x: 5, y: 0 })
+    expect(screen.getCursor()).toEqual({ col: 5, row: 0 })
   })
 
   test("CUB moves cursor back", () => {
     const screen = screenWith("\x1b[10;1H\x1b[3D")
-    expect(screen.getCursorPosition()).toEqual({ x: 0, y: 9 }) // clamped at 0
+    expect(screen.getCursor()).toEqual({ col: 0, row: 9 }) // clamped at 0
   })
 
   test("CHA sets column", () => {
     const screen = screenWith("\x1b[15G")
-    expect(screen.getCursorPosition().x).toBe(14)
+    expect(screen.getCursor().col).toBe(14)
   })
 
   test("VPA sets row", () => {
     const screen = screenWith("\x1b[10d")
-    expect(screen.getCursorPosition().y).toBe(9)
+    expect(screen.getCursor().row).toBe(9)
   })
 
   test("CNL moves to next line start", () => {
     const screen = screenWith("hello\x1b[E")
-    expect(screen.getCursorPosition()).toEqual({ x: 0, y: 1 })
+    expect(screen.getCursor()).toEqual({ col: 0, row: 1 })
   })
 
   test("CPL moves to previous line start", () => {
     const screen = screenWith("\x1b[5;10H\x1b[2F")
-    expect(screen.getCursorPosition()).toEqual({ x: 0, y: 2 })
+    expect(screen.getCursor()).toEqual({ col: 0, row: 2 })
   })
 
   test("HVP moves cursor (same as CUP)", () => {
     const screen = screenWith("\x1b[3;7f")
-    expect(screen.getCursorPosition()).toEqual({ x: 6, y: 2 })
+    expect(screen.getCursor()).toEqual({ col: 6, row: 2 })
   })
 })
 
@@ -527,19 +526,19 @@ describe("REP (CSI Ps b)", () => {
     expect(screen.getCell(0, 1).char).toBe("X")
     expect(screen.getCell(0, 2).char).toBe("X")
     expect(screen.getCell(0, 3).char).toBe("X")
-    expect(screen.getCursorPosition().x).toBe(4)
+    expect(screen.getCursor().col).toBe(4)
   })
 
   test("repeats with default count of 1", () => {
     const screen = screenWith("A\x1b[b")
     expect(screen.getCell(0, 0).char).toBe("A")
     expect(screen.getCell(0, 1).char).toBe("A")
-    expect(screen.getCursorPosition().x).toBe(2)
+    expect(screen.getCursor().col).toBe(2)
   })
 
   test("does nothing if no previous character", () => {
     const screen = screenWith("\x1b[3b")
-    expect(screen.getCursorPosition().x).toBe(0)
+    expect(screen.getCursor().col).toBe(0)
   })
 
   test("preserves attributes of repeated character", () => {
@@ -844,7 +843,7 @@ describe("DECSTR (soft terminal reset)", () => {
 
   test("moves cursor to home", () => {
     const screen = screenWith("\x1b[10;20H\x1b[!p")
-    expect(screen.getCursorPosition()).toEqual({ x: 0, y: 0 })
+    expect(screen.getCursor()).toEqual({ col: 0, row: 0 })
   })
 })
 
@@ -1044,7 +1043,7 @@ describe("scroll operations", () => {
     const screen = createVtermScreen({ cols: 10, rows: 5 })
     screen.process(enc.encode("\x1b[2;4r")) // Scroll region rows 2-4
     // Cursor should be at home after DECSTBM
-    expect(screen.getCursorPosition()).toEqual({ x: 0, y: 0 })
+    expect(screen.getCursor()).toEqual({ col: 0, row: 0 })
   })
 })
 
@@ -1144,7 +1143,7 @@ describe("mode management", () => {
 describe("DECSC / DECRC", () => {
   test("saves and restores cursor position", () => {
     const screen = screenWith("\x1b[5;10H\x1b7\x1b[1;1H\x1b8")
-    expect(screen.getCursorPosition()).toEqual({ x: 9, y: 4 })
+    expect(screen.getCursor()).toEqual({ col: 9, row: 4 })
   })
 
   test("saves and restores attributes", () => {
@@ -1174,7 +1173,7 @@ describe("DECSC / DECRC", () => {
 describe("NEL (Next Line)", () => {
   test("moves to start of next line", () => {
     const screen = screenWith("hello\x1bE")
-    expect(screen.getCursorPosition()).toEqual({ x: 0, y: 1 })
+    expect(screen.getCursor()).toEqual({ col: 0, row: 1 })
   })
 })
 
@@ -1187,7 +1186,7 @@ describe("wide characters", () => {
     const screen = screenWith("\u4e16") // 世
     expect(screen.getCell(0, 0).char).toBe("\u4e16")
     expect(screen.getCell(0, 0).wide).toBe(true)
-    expect(screen.getCursorPosition().x).toBe(2)
+    expect(screen.getCursor().col).toBe(2)
   })
 })
 
@@ -1265,7 +1264,7 @@ describe("RIS (ESC c)", () => {
     const screen = createVtermScreen()
     screen.process(enc.encode("hello\x1b[?1049h\x1b[1;31m"))
     screen.process(enc.encode("\x1bc")) // Full reset
-    expect(screen.getCursorPosition()).toEqual({ x: 0, y: 0 })
+    expect(screen.getCursor()).toEqual({ col: 0, row: 0 })
     expect(screen.getMode("altScreen")).toBe(false)
     expect(screen.getTitle()).toBe("")
   })
@@ -1328,7 +1327,7 @@ describe("combined SGR attributes", () => {
 describe("SCP/RCP", () => {
   test("saves and restores cursor position", () => {
     const screen = screenWith("\x1b[5;10H\x1b[s\x1b[1;1H\x1b[u")
-    expect(screen.getCursorPosition()).toEqual({ x: 9, y: 4 })
+    expect(screen.getCursor()).toEqual({ col: 9, row: 4 })
   })
 })
 
@@ -1349,8 +1348,8 @@ describe("resize", () => {
     const screen = createVtermScreen({ cols: 20, rows: 10 })
     screen.process(enc.encode("\x1b[8;15H")) // Row 8, Col 15
     screen.resize(10, 5)
-    expect(screen.getCursorPosition().x).toBeLessThan(10)
-    expect(screen.getCursorPosition().y).toBeLessThan(5)
+    expect(screen.getCursor().col).toBeLessThan(10)
+    expect(screen.getCursor().row).toBeLessThan(5)
   })
 })
 
@@ -1909,11 +1908,11 @@ describe("DECLRMM — left/right margins", () => {
     screen.process(enc.encode("ABCDEFGHIJKLMNO")) // 15 chars, should wrap at col 14
 
     // First 11 chars fit in cols 4..14 (0-based), then wrap
-    const line0 = screen.getLine(0)
+    const line0 = screen.getRow(0)
     expect(line0[4]!.char).toBe("A")
     expect(line0[14]!.char).toBe("K")
     // After wrapping, cursor goes to leftMargin (col 4) on next row
-    const line1 = screen.getLine(1)
+    const line1 = screen.getRow(1)
     expect(line1[4]!.char).toBe("L")
   })
 
@@ -1925,7 +1924,7 @@ describe("DECLRMM — left/right margins", () => {
     screen.process(enc.encode("DEF"))
     // CSI u should restore cursor
     screen.process(enc.encode("\x1b[u"))
-    expect(screen.getCursorPosition()).toEqual({ x: 3, y: 0 })
+    expect(screen.getCursor()).toEqual({ col: 3, row: 0 })
   })
 
   test("erase in line respects left/right margins", () => {
@@ -1939,7 +1938,7 @@ describe("DECLRMM — left/right margins", () => {
     screen.process(enc.encode("\x1b[1;10H"))
     screen.process(enc.encode("\x1b[0K")) // EL 0 — erase cursor to end (within right margin)
 
-    const line = screen.getLine(0)
+    const line = screen.getRow(0)
     // Cols 0-3 should still have original text
     expect(line[0]!.char).toBe("0")
     expect(line[3]!.char).toBe("3")
@@ -1967,7 +1966,7 @@ describe("DECLRMM — left/right margins", () => {
     screen.process(enc.encode("\x1b[S"))
 
     // Row 0: cols outside margins should keep original content
-    const line0 = screen.getLine(0)
+    const line0 = screen.getRow(0)
     expect(line0[0]!.char).toBe("0")
     expect(line0[1]!.char).toBe("1")
     // Cols 2-6 (0-based) should have shifted up from row 1
@@ -1992,7 +1991,7 @@ describe("DECLRMM — left/right margins", () => {
     screen.process(enc.encode("\x1b[T"))
 
     // Row 0: within margins should be blank (scrolled in)
-    const line0 = screen.getLine(0)
+    const line0 = screen.getRow(0)
     expect(line0[0]!.char).toBe("0")
     expect(line0[1]!.char).toBe("1")
     expect(line0[2]!.char).toBe("") // Blank from scroll
@@ -2010,7 +2009,7 @@ describe("DECLRMM — left/right margins", () => {
     screen.process(enc.encode("\x1b[1;5H"))
     screen.process(enc.encode("\x1b[@")) // ICH — insert 1 character
 
-    const line = screen.getLine(0)
+    const line = screen.getRow(0)
     // Col 0-1 unchanged
     expect(line[0]!.char).toBe("A")
     expect(line[1]!.char).toBe("B")
@@ -2033,7 +2032,7 @@ describe("DECLRMM — left/right margins", () => {
     screen.process(enc.encode("\x1b[1;4H"))
     screen.process(enc.encode("\x1b[P")) // DCH — delete 1 character
 
-    const line = screen.getLine(0)
+    const line = screen.getRow(0)
     // Col 0-1 unchanged
     expect(line[0]!.char).toBe("A")
     expect(line[1]!.char).toBe("B")
@@ -2237,7 +2236,7 @@ describe("OSC 5522 — advanced clipboard", () => {
 // Snapshot / restore
 // ═══════════════════════════════════════════════════════
 
-function expectRestoredSnapshot(snapshot: VtermScreenSnapshot): void {
+function expectRestoredSnapshot(snapshot: Snapshot): void {
   const restored = createVtermScreen()
   restored.restore(snapshot)
   expect(restored.snapshot()).toEqual(snapshot)
@@ -2330,7 +2329,7 @@ describe("snapshot / restore", () => {
     const snapshot = screen.snapshot()
 
     expect(() => {
-      screen.restore({ ...snapshot, version: 999 } as unknown as VtermScreenSnapshot)
+      screen.restore({ ...snapshot, version: 999 } as unknown as Snapshot)
     }).toThrow(/Unsupported vterm snapshot version/)
   })
 
@@ -2338,7 +2337,7 @@ describe("snapshot / restore", () => {
     const target = screenWith("target", { cols: 6, rows: 2 })
     const before = target.snapshot()
     const donor = screenWith("donor", { cols: 8, rows: 3 }).snapshot()
-    const malformed = { ...donor, colors: undefined } as unknown as VtermScreenSnapshot
+    const malformed = { ...donor, colors: undefined } as unknown as Snapshot
 
     expect(() => {
       target.restore(malformed)

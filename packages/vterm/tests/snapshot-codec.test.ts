@@ -1,5 +1,5 @@
 /**
- * snapshot-codec.test.ts — round-trip + size oracle for the binary ScreenSnapshot codec.
+ * snapshot-codec.test.ts — round-trip + size oracle for the binary Snapshot codec.
  *
  * @failure  A checkpoint that persists a terminal through encodeScreenSnapshotBinary reloads
  *           corrupted — a cell's color / underline style / hyperlink / wide bit flips, an
@@ -25,7 +25,7 @@ import {
   decodeScreenSnapshotBinary,
   encodeScreenSnapshotBinary,
   type VtermScreen,
-  type VtermScreenSnapshot,
+  type Snapshot,
 } from "../src/index.ts"
 
 const ESC = "\x1b"
@@ -40,7 +40,7 @@ function feed(screen: VtermScreen, data: string): void {
 }
 
 /** Encode → decode → assert byte-exact structural equality; return the decoded snapshot. */
-function roundTrip(snapshot: VtermScreenSnapshot): VtermScreenSnapshot {
+function roundTrip(snapshot: Snapshot): Snapshot {
   const encoded = encodeScreenSnapshotBinary(snapshot)
   const decoded = decodeScreenSnapshotBinary(encoded)
   expect(decoded).toEqual(snapshot)
@@ -278,7 +278,7 @@ describe("snapshot-codec — round-trip deep equality", () => {
     const screen = mkScreen(10, 3)
     feed(screen, `${"B".repeat(15)}\r\nx\r\ny\r\nz`)
     const snap = screen.snapshot()
-    const legacy = { ...snap, scrollbackSoftWrapped: undefined } as unknown as VtermScreenSnapshot
+    const legacy = { ...snap, scrollbackSoftWrapped: undefined } as unknown as Snapshot
     const decoded = decodeScreenSnapshotBinary(encodeScreenSnapshotBinary(legacy))
     expect(decoded.scrollbackSoftWrapped).toBeUndefined()
     expect(decoded).toEqual(legacy)
@@ -354,7 +354,7 @@ describe("snapshot-codec — size", () => {
       "total 480",
       "npm warn deprecated foo@1.2.3: use bar instead",
       "  ✓ packages/vterm/tests/serialize.test.ts (42 tests) 128ms",
-      "export function encodeScreenSnapshotBinary(snapshot: ScreenSnapshot): Uint8Array {",
+      "export function encodeScreenSnapshotBinary(snapshot: Snapshot): Uint8Array {",
       "  const writer = createWriter()   // grow-on-demand byte buffer",
       "Compiled 1284 modules in 3.2s",
     ]

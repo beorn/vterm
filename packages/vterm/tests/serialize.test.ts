@@ -28,7 +28,7 @@ import {
   serializeSnapshot,
   type ScreenCell,
   type VtermScreen,
-  type VtermScreenSnapshot,
+  type Snapshot,
 } from "../src/index.ts"
 
 const ESC = "\x1b"
@@ -90,7 +90,7 @@ const EXCLUDED_MODES = ["syncOutput", "decColumn", "kittyGraphics"] as const
  * only SCROLLBACK wrap bits survive, and those ARE compared), and the inactive
  * buffer's grid (a byte stream paints one screen; the binary snapshot carries it).
  */
-function stateView(snap: VtermScreenSnapshot): Record<string, unknown> {
+function stateView(snap: Snapshot): Record<string, unknown> {
   const modes: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(snap.modes)) {
     if (!(EXCLUDED_MODES as readonly string[]).includes(key)) modes[key] = value
@@ -127,7 +127,7 @@ function roundTripState(source: VtermScreen, cols: number, rows: number): VtermS
       expect(cellView(sink.getCell(row, col)), `cell (${row},${col})`).toEqual(cellView(source.getCell(row, col)))
     }
   }
-  expect(sink.getCursorPosition(), "cursor position").toEqual(source.getCursorPosition())
+  expect(sink.getCursor(), "cursor position").toEqual(source.getCursor())
   expect(sink.getCursorVisible(), "cursor visibility").toBe(source.getCursorVisible())
   expect(sink.snapshot().attrs, "pending pen").toEqual(snapshot.attrs)
   expect(stateView(sink.snapshot()), "non-cell state (oracle ii)").toEqual(stateView(snapshot))
@@ -568,7 +568,7 @@ describe("scrollback soft-wrap bits — the model add", () => {
     // Forward-compat: a version-1 snapshot without the field restores as all-false.
     const legacy = { ...snap, scrollbackSoftWrapped: undefined }
     const old = mkScreen(10, 3)
-    old.restore(legacy as unknown as VtermScreenSnapshot)
+    old.restore(legacy as unknown as Snapshot)
     expect(old.snapshot().scrollbackSoftWrapped).toEqual(new Array(snap.scrollback.length).fill(false))
   })
 
@@ -588,7 +588,7 @@ describe("scrollback soft-wrap bits — the model add", () => {
 
 describe("serializeSnapshot — mode emission", () => {
   /** One entry per emitted mode family (bead golden 9 — the reattach matrix). */
-  const MODE_MATRIX: readonly (readonly [name: string, setup: string, check: (snap: VtermScreenSnapshot) => void])[] = [
+  const MODE_MATRIX: readonly (readonly [name: string, setup: string, check: (snap: Snapshot) => void])[] = [
     ["origin ?6", `${ESC}[?6h`, (m) => expect(m.modes.origin).toBe(true)],
     ["insert IRM 4", `${ESC}[4h`, (m) => expect(m.modes.insert).toBe(true)],
     ["reverse ?5", `${ESC}[?5h`, (m) => expect(m.modes.reverseVideo).toBe(true)],
@@ -738,7 +738,7 @@ describe("serializeSnapshot — mode emission", () => {
     feed(source, `${ESC}[3;4H`) // region-relative → absolute row 4 (0-based 3), col 4 (0-based 3)
     feed(source, "MID")
     const sink = roundTripState(source, 20, 8)
-    expect(sink.getCursorPosition()).toEqual({ x: 6, y: 3 })
+    expect(sink.getCursor()).toEqual({ col: 6, row: 3 })
   })
 
   test("golden 8b: alt screen + margins + mid-screen cursor", () => {

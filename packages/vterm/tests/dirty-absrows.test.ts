@@ -74,13 +74,13 @@ describe("absolute-row read API", () => {
     // Absolute row 0 = oldest scrollback line; NOT the top of the screen.
     expect(rowText(s.getRowAbsolute(0))).toBe("line0")
     // Top-of-screen (screen-relative row 0) is a DIFFERENT line.
-    expect(rowText(s.getLine(0))).toBe("line7")
+    expect(rowText(s.getRow(0))).toBe("line7")
     // The absolute index of the top-of-screen row equals totalRows - screenRows.
     const top = s.totalRows() - s.screenRows()
     expect(top).toBe(7)
-    expect(rowText(s.getRowAbsolute(top))).toBe(rowText(s.getLine(0)))
+    expect(rowText(s.getRowAbsolute(top))).toBe(rowText(s.getRow(0)))
     // Last screen row.
-    expect(rowText(s.getRowAbsolute(s.totalRows() - 1))).toBe(rowText(s.getLine(3)))
+    expect(rowText(s.getRowAbsolute(s.totalRows() - 1))).toBe(rowText(s.getRow(3)))
 
     // At the bottom (no viewport scroll) viewportTop sits at the top of the screen.
     expect(s.viewportTop()).toBe(top)

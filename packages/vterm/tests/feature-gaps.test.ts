@@ -163,7 +163,7 @@ describe("tab stops", () => {
   test("default tab stops every 8 cols", () => {
     const { screen, feed } = makeScreen()
     feed("\t")
-    expect(screen.getCursorPosition().x).toBe(8)
+    expect(screen.getCursor().col).toBe(8)
   })
 
   test("HTS sets a custom stop, TAB lands on it", () => {
@@ -175,27 +175,27 @@ describe("tab stops", () => {
     feed("\x1b[6G") // col 6
     feed("\x1bH") // HTS at col 5 (0-based)
     feed("\x1b[1G\t") // from col 0, tab
-    expect(screen.getCursorPosition().x).toBe(5)
+    expect(screen.getCursor().col).toBe(5)
   })
 
   test("TBC 3 clears all stops → TAB does not move", () => {
     const { screen, feed } = makeScreen()
     feed("\x1b[3g") // clear all
     feed("\t")
-    expect(screen.getCursorPosition().x).toBe(0)
+    expect(screen.getCursor().col).toBe(0)
   })
 
   test("CHT advances by N stops", () => {
     const { screen, feed } = makeScreen()
     feed("\x1b[2I") // forward 2 stops from col 0
-    expect(screen.getCursorPosition().x).toBe(16)
+    expect(screen.getCursor().col).toBe(16)
   })
 
   test("CBT goes back by N stops", () => {
     const { screen, feed } = makeScreen()
     feed("\x1b[21G") // col 21 (0-based: 20)
     feed("\x1b[Z") // back 1 stop → col 16
-    expect(screen.getCursorPosition().x).toBe(16)
+    expect(screen.getCursor().col).toBe(16)
   })
 })
 
@@ -205,7 +205,7 @@ describe("HPA (CSI `)", () => {
   test("moves cursor to absolute column", () => {
     const { screen, feed } = makeScreen()
     feed("ABCDEF\x1b[3`") // HPA 3 → col 2 (0-based)
-    expect(screen.getCursorPosition().x).toBe(2)
+    expect(screen.getCursor().col).toBe(2)
   })
 })
 
@@ -218,7 +218,7 @@ describe("DECALN (ESC # 8)", () => {
     feed("\x1b#8")
     expect(screen.getCell(0, 0).char).toBe("E")
     expect(screen.getCell(4, 9).char).toBe("E")
-    expect(screen.getCursorPosition()).toEqual({ x: 0, y: 0 })
+    expect(screen.getCursor()).toEqual({ col: 0, row: 0 })
   })
 })
 
@@ -358,7 +358,7 @@ describe("new mode tracking", () => {
   test("?1048 save/restore cursor", () => {
     const { screen, feed } = makeScreen()
     feed("\x1b[5;10H\x1b[?1048h\x1b[15;20H\x1b[?1048l")
-    expect(screen.getCursorPosition()).toEqual({ x: 9, y: 4 })
+    expect(screen.getCursor()).toEqual({ col: 9, row: 4 })
   })
 })
 

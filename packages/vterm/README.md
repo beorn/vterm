@@ -243,18 +243,11 @@ screen.signals.damage$.subscribe((d: DirtyRegion) => {
 })
 ```
 
-## Naming — schema migration
+## Naming
 
-The public vocabulary is converging on the terminal domain model (name the thing, not the mechanism; **row = cells, line = text**; flat progressive shapes over discriminated unions). The canonical names below are live now; the old names remain exported as `@deprecated` aliases through the migration window, so existing code keeps compiling.
+The public vocabulary follows the terminal domain model (name the thing, not the mechanism; **row = cells, line = text**; flat progressive shapes over discriminated unions): `Color`, `Snapshot`, `getRow(row)`, `getCursor(): Cursor` (`Cursor` is `{ col, row }`). The pre-§9 names — `CellColor`, `ScreenSnapshot`/`VtermScreenSnapshot`, `getLine(row)`, `getCursorPosition(): {x,y}` — rode a deprecation window as `@deprecated` aliases and have since been deleted; they no longer compile.
 
-| Deprecated                               | Canonical             | Notes                                                                                                        |
-| ---------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `CellColor`                              | `Color`               | Same shape `{ r, g, b, index? }`; a type named `RGB`/`CellColor` carrying `.index` was the smell.            |
-| `ScreenSnapshot` / `VtermScreenSnapshot` | `Snapshot`            | The namespace supplies the context; `VtermScreenSnapshot` stays exported as an alias for existing consumers. |
-| `getLine(row): ScreenCell[]`             | `getRow(row)`         | Row = cells; the text readers (`getText`, `getScrollbackText`) keep "line/text".                             |
-| `getCursorPosition(): {x,y}`             | `getCursor(): Cursor` | `Cursor` is `{ col, row }` — the grid's own vocabulary.                                                      |
-
-**Deferred (not renamed this slice):** the `Snapshot.cursor` / `Snapshot.savedState` fields keep `x`/`y` rather than `col`/`row`, because those field names are the wire shape read by `encodeScreenSnapshotBinary` — renaming them would silently change the persisted binary format. The `col`/`row` vocabulary is available at the read boundary via `getCursor()` / the `Cursor` type. The snapshot field rename is a codec-format concern for a coordinated schema bump.
+**Deferred (not renamed):** the `Snapshot.cursor` / `Snapshot.savedState` fields keep `x`/`y` rather than `col`/`row`, because those field names are the wire shape read by `encodeScreenSnapshotBinary` — renaming them would silently change the persisted binary format. The `col`/`row` vocabulary is available at the read boundary via `getCursor()` / the `Cursor` type. The snapshot field rename is a codec-format concern for a coordinated schema bump.
 
 ## API
 
@@ -279,10 +272,8 @@ The public vocabulary is converging on the terminal domain model (name the thing
 | `getText()`                    | Get all text (scrollback + screen)                                                       |
 | `getTextRange(sr, sc, er, ec)` | Get text in a range                                                                      |
 | `getRow(row)`                  | Get cells for a screen row (row = cells, line = text)                                    |
-| `getLine(row)`                 | **Deprecated** — alias of `getRow`                                                       |
 | `getCell(row, col)`            | Get a single cell                                                                        |
 | `getCursor()`                  | Get cursor `{ col, row }`                                                                |
-| `getCursorPosition()`          | **Deprecated** — cursor `{ x, y }`; use `getCursor()`                                    |
 | `getCursorVisible()`           | Check cursor visibility                                                                  |
 | `getCursorShape()`             | Get cursor shape: `"block"`, `"underline"`, or `"bar"`                                   |
 | `getCursorBlinking()`          | Check if cursor is blinking                                                              |
@@ -314,7 +305,7 @@ interface ScreenCell {
   faint: boolean
   italic: boolean
   underline: "none" | "single" | "double" | "curly" | "dotted" | "dashed"
-  underlineColor: CellColor | null
+  underlineColor: Color | null
   overline: boolean
   strikethrough: boolean
   inverse: boolean
@@ -363,7 +354,7 @@ history and repaint only what changed.
 The buffer is the retained scrollback followed by the screen. **Absolute row 0 is the
 oldest retained scrollback line**; the screen occupies the last `screenRows()` rows
 (absolute `totalRows() - screenRows()` through `totalRows() - 1`). The existing
-screen-relative reads (`getLine`, `getCell`) are unchanged — absolute addressing is
+screen-relative reads (`getRow`, `getCell`) are unchanged — absolute addressing is
 additive.
 
 ```typescript
@@ -376,7 +367,7 @@ screen.viewportTop() // absolute row of the viewport's top line
 
 Naming follows the ecosystem rule **row = cells, line = text**: `getRowAbsolute`
 returns cells; colors are stripped of palette-origin index at the read boundary (same
-contract as `getLine`). Out-of-range indices return a blank row.
+contract as `getRow`). Out-of-range indices return a blank row.
 
 **Stability contract.** As lines scroll IN, an existing scrollback row keeps its
 absolute index (the screen shifts up in absolute terms, but its content keeps the same

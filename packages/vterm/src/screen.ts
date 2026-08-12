@@ -39,7 +39,7 @@
  * An RGB color, identity-preserving. `r`/`g`/`b` are always present (painters read
  * them unconditionally); `index` is optional palette provenance. Named `Color` per the
  * §9 naming ruling (rule 5: flat progressive shape over a discriminated union — a type
- * named `RGB` that carries `.index` would lie). {@link CellColor} is the deprecated alias.
+ * named `RGB` that carries `.index` would lie).
  */
 export interface Color {
   r: number
@@ -64,20 +64,17 @@ export interface Color {
   index?: number
 }
 
-/** @deprecated Renamed to {@link Color} (§9 naming ruling). This alias rides the migration window. */
-export type CellColor = Color
-
 export type UnderlineStyle = "none" | "single" | "double" | "curly" | "dotted" | "dashed"
 
 export interface ScreenCell {
   char: string
-  fg: CellColor | null
-  bg: CellColor | null
+  fg: Color | null
+  bg: Color | null
   bold: boolean
   faint: boolean
   italic: boolean
   underline: UnderlineStyle
-  underlineColor: CellColor | null
+  underlineColor: Color | null
   overline: boolean
   strikethrough: boolean
   inverse: boolean
@@ -108,13 +105,13 @@ export interface SixelImage {
 }
 
 export interface ScreenAttrsSnapshot {
-  fg: CellColor | null
-  bg: CellColor | null
+  fg: Color | null
+  bg: Color | null
   bold: boolean
   faint: boolean
   italic: boolean
   underline: UnderlineStyle
-  underlineColor: CellColor | null
+  underlineColor: Color | null
   overline: boolean
   strikethrough: boolean
   inverse: boolean
@@ -124,15 +121,15 @@ export interface ScreenAttrsSnapshot {
 }
 
 export interface ScreenColorStateSnapshot {
-  palette256: CellColor[]
-  defaultFgColor: CellColor | null
-  defaultBgColor: CellColor | null
-  cursorColor: CellColor | null
-  specialColors: [number, CellColor][]
-  pointerFgColor: CellColor | null
-  pointerBgColor: CellColor | null
-  highlightBgColor: CellColor | null
-  highlightFgColor: CellColor | null
+  palette256: Color[]
+  defaultFgColor: Color | null
+  defaultBgColor: Color | null
+  cursorColor: Color | null
+  specialColors: [number, Color][]
+  pointerFgColor: Color | null
+  pointerBgColor: Color | null
+  highlightBgColor: Color | null
+  highlightFgColor: Color | null
 }
 
 export type ScreenParserState =
@@ -157,8 +154,7 @@ export interface ScreenBufferSnapshot {
 /**
  * The whole-world persist/restore value — grids, ranges, modes, cursor, colors,
  * parser transients, wrap bits. JSON-safe plain data; the persist boundary, not the
- * incremental read path. Named `Snapshot` per §9 (the namespace supplies the context);
- * {@link ScreenSnapshot} is the deprecated alias.
+ * incremental read path. Named `Snapshot` per §9 (the namespace supplies the context).
  *
  * Note: `cursor`/`savedState` still carry `x`/`y` (not `col`/`row`) — the §9
  * `Cursor{col,row}` field rename is DEFERRED here because these fields are the wire
@@ -256,14 +252,10 @@ export interface Snapshot {
   }
 }
 
-/** @deprecated Renamed to {@link Snapshot} (§9 naming ruling). This alias rides the migration window. */
-export type ScreenSnapshot = Snapshot
-
 /**
  * The cursor position at the read boundary, in the grid's own `col`/`row` vocabulary
  * (§9 naming ruling: `x`/`y` contradicted the row/col naming used everywhere else, and
- * the `State` suffix was redundant). Returned by {@link VtermScreen.getCursor}; the legacy
- * {@link VtermScreen.getCursorPosition} still returns the `{ x, y }` shape (deprecated).
+ * the `State` suffix was redundant). Returned by {@link VtermScreen.getCursor}.
  */
 export interface Cursor {
   col: number
@@ -464,8 +456,6 @@ export interface Screen {
    * stripped of palette-origin index at the read boundary.
    */
   getRow(row: number): ScreenCell[]
-  /** @deprecated Renamed to {@link getRow} (§9: row = cells, line = text). */
-  getLine(row: number): ScreenCell[]
   getText(): string
   /** Scrollback rows above the visible grid, oldest first, rendered like getText(). */
   getScrollbackText(): string
@@ -474,7 +464,7 @@ export interface Screen {
   // ── Absolute-row read plane ──
   // One coordinate over the whole buffer (scrollback + screen). Absolute row 0 = oldest RETAINED
   // scrollback line; the screen occupies the LAST `screenRows()` rows. The existing screen-relative
-  // reads (`getCell`/`getLine`) are untouched.
+  // reads (`getCell`/`getRow`) are untouched.
 
   /** Total rows in the buffer: retained scrollback + screen. */
   totalRows(): number
@@ -487,8 +477,8 @@ export interface Screen {
   viewportTop(): number
   /**
    * The row at ABSOLUTE index `row` (row 0 = oldest retained scrollback line; the screen occupies
-   * the last `screenRows()` rows). Colors are stripped of palette-origin index like {@link getLine}.
-   * Out-of-range indices return a blank row (matching the {@link getLine} read-boundary contract).
+   * the last `screenRows()` rows). Colors are stripped of palette-origin index like {@link getRow}.
+   * Out-of-range indices return a blank row (matching the {@link getRow} read-boundary contract).
    */
   getRowAbsolute(row: number): ScreenCell[]
   /**
@@ -507,8 +497,6 @@ export interface Screen {
 
   /** Cursor position in the grid's `col`/`row` vocabulary (§9). See {@link Cursor}. */
   getCursor(): Cursor
-  /** @deprecated Use {@link getCursor} — returns `{ col, row }` per the §9 naming ruling. */
-  getCursorPosition(): { x: number; y: number }
   getCursorVisible(): boolean
   getCursorShape(): "block" | "underline" | "bar"
   getCursorBlinking(): boolean
@@ -553,14 +541,14 @@ function emptyCell(): ScreenCell {
 }
 
 /**
- * Drop the palette-origin {@link CellColor.index} for the public per-cell read
- * boundary. `getCell`/`getLine` return the RESOLVED RGB — their long-standing
+ * Drop the palette-origin {@link Color.index} for the public per-cell read
+ * boundary. `getCell`/`getRow` return the RESOLVED RGB — their long-standing
  * contract — while the origin index is serialization-only provenance that rides
- * {@link ScreenSnapshot} (and thus `serialize()`), not the inspection API.
+ * {@link Snapshot} (and thus `serialize()`), not the inspection API.
  * Returns the SAME reference when there is no index (the common truecolor/null
  * case), so the read path allocates nothing there.
  */
-function stripColorIndex(c: CellColor | null): CellColor | null {
+function stripColorIndex(c: Color | null): Color | null {
   if (c === null || c.index === undefined) return c
   return { r: c.r, g: c.g, b: c.b }
 }
@@ -581,7 +569,7 @@ function stripCellColorIndex(cell: ScreenCell): ScreenCell {
 // Each row is a {@link PackedRow}: one `Uint32` metadata word per column (boolean
 // attributes + a 3-bit underline-style enum + color/url presence bits), a parallel
 // `string[]` grapheme sidecar, and per-row sparse `Map`s holding the resolved,
-// identity-preserving colors ({@link CellColor} `{ r, g, b, index? }`) and the OSC-8
+// identity-preserving colors ({@link Color} `{ r, g, b, index? }`) and the OSC-8
 // URL. `ScreenCell` heap objects materialize ONLY at the read boundary — the
 // terminal-flow perf ruling: per-cell heap objects are the proven 3-5x flood cost.
 //
@@ -591,7 +579,7 @@ function stripCellColorIndex(cell: ScreenCell): ScreenCell {
 // compatible shapes over shared code). It diverges deliberately in colors: silvery
 // packs 8-bit palette indices with a true-color side map, but vterm resolves every
 // indexed SGR to RGB at parse time and preserves the origin `index`, so vterm stores
-// whole {@link CellColor} objects in the maps — lossless identity, never an 8-bit slot.
+// whole {@link Color} objects in the maps — lossless identity, never an 8-bit slot.
 
 // Boolean attribute bits (0-8) + underline style (9-11) + presence bits (12-15).
 const F_BOLD = 1 << 0
@@ -623,7 +611,7 @@ function bitsToUnderline(meta: number): UnderlineStyle {
 }
 
 /** Copy a color preserving its palette-origin `index` (identity), or null through. */
-function copyColor(c: CellColor | null): CellColor | null {
+function copyColor(c: Color | null): Color | null {
   if (c === null) return null
   return c.index === undefined ? { r: c.r, g: c.g, b: c.b } : { r: c.r, g: c.g, b: c.b, index: c.index }
 }
@@ -648,7 +636,7 @@ interface PackedRow {
   /** Reset a column to the default-empty cell. */
   setEmpty(col: number): void
   /** Erase a column to blank, keeping the current background (BCE). */
-  eraseWithBg(col: number, bg: CellColor | null): void
+  eraseWithBg(col: number, bg: Color | null): void
   /** Mark a column wide and blank its trailing spacer (col+1). */
   widen(col: number): void
   /** Append a grapheme to a column's char (combining marks / ZWJ / VS16). */
@@ -667,12 +655,12 @@ interface PackedRow {
 }
 
 /** Pack a color's 8-bit channels into a 24-bit `0xRRGGBB` word. */
-function packRgb(c: CellColor): number {
+function packRgb(c: Color): number {
   return (((c.r & 0xff) << 16) | ((c.g & 0xff) << 8) | (c.b & 0xff)) >>> 0
 }
 
-/** Materialize a {@link CellColor} from a packed RGB word + index (`-1` = no index). */
-function unpackColor(rgb: number, idx: number): CellColor {
+/** Materialize a {@link Color} from a packed RGB word + index (`-1` = no index). */
+function unpackColor(rgb: number, idx: number): Color {
   const r = (rgb >> 16) & 0xff
   const g = (rgb >> 8) & 0xff
   const b = rgb & 0xff
@@ -692,7 +680,7 @@ function makePackedRow(width: number): PackedRow {
   let ulIdx: Int16Array | null = null
   let urlMap: Map<number, string> | null = null
 
-  function setFg(col: number, c: CellColor): void {
+  function setFg(col: number, c: Color): void {
     if (fgRgb === null) {
       fgRgb = new Uint32Array(width)
       fgIdx = new Int16Array(width)
@@ -700,7 +688,7 @@ function makePackedRow(width: number): PackedRow {
     fgRgb[col] = packRgb(c)
     fgIdx![col] = c.index ?? -1
   }
-  function setBg(col: number, c: CellColor): void {
+  function setBg(col: number, c: Color): void {
     if (bgRgb === null) {
       bgRgb = new Uint32Array(width)
       bgIdx = new Int16Array(width)
@@ -708,7 +696,7 @@ function makePackedRow(width: number): PackedRow {
     bgRgb[col] = packRgb(c)
     bgIdx![col] = c.index ?? -1
   }
-  function setUl(col: number, c: CellColor): void {
+  function setUl(col: number, c: Color): void {
     if (ulRgb === null) {
       ulRgb = new Uint32Array(width)
       ulIdx = new Int16Array(width)
@@ -872,7 +860,7 @@ function packedRowFromCells(cells: readonly ScreenCell[], width: number): Packed
 
 // ── ANSI 256-color palette ─────────────────────────────────────────────
 
-const ANSI_16: readonly CellColor[] = [
+const ANSI_16: readonly Color[] = [
   { r: 0x00, g: 0x00, b: 0x00 }, // 0  Black
   { r: 0x80, g: 0x00, b: 0x00 }, // 1  Red
   { r: 0x00, g: 0x80, b: 0x00 }, // 2  Green
@@ -891,8 +879,8 @@ const ANSI_16: readonly CellColor[] = [
   { r: 0xff, g: 0xff, b: 0xff }, // 15 Bright White
 ]
 
-function buildPalette256(): CellColor[] {
-  const palette: CellColor[] = [...ANSI_16]
+function buildPalette256(): Color[] {
+  const palette: Color[] = [...ANSI_16]
   const levels = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff]
   for (let r = 0; r < 6; r++) {
     for (let g = 0; g < 6; g++) {
@@ -914,7 +902,7 @@ function buildPalette256(): CellColor[] {
  * Parse an X11-style color spec: "rgb:RR/GG/BB", "rgb:RRRR/GGGG/BBBB",
  * "#RRGGBB", "#RGB". Returns null if unparseable.
  */
-function parseColorSpec(spec: string): CellColor | null {
+function parseColorSpec(spec: string): Color | null {
   const s = spec.trim()
   // rgb:RR/GG/BB or rgb:RRRR/GGGG/BBBB
   const rgbMatch = /^rgb:([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})$/.exec(s)
@@ -948,7 +936,7 @@ function parseColorSpec(spec: string): CellColor | null {
 }
 
 /** Format a color as X11 "rgb:RRRR/GGGG/BBBB" (16-bit per channel, standard xterm reply). */
-function formatColorResponse(c: CellColor): string {
+function formatColorResponse(c: Color): string {
   const scale = (v: number): string => {
     const v16 = Math.round((v * 65535) / 255)
     return v16.toString(16).padStart(4, "0")
@@ -1177,19 +1165,19 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let utf8MouseMode = false // ?1005
 
   // Color state — mutable palette & OSC 4/5/10-19 color setters
-  let palette256: CellColor[] = buildPalette256()
-  let defaultFgColor: CellColor | null = null // OSC 10 / 110
-  let defaultBgColor: CellColor | null = null // OSC 11 / 111
-  let cursorColor: CellColor | null = null // OSC 12 / 112
-  const specialColors: Map<number, CellColor> = new Map() // OSC 5 / 105 (0=bold, 1=ul, 2=blink, 3=reverse, 4=italic)
-  let pointerFgColor: CellColor | null = null // OSC 13 / 113
-  let pointerBgColor: CellColor | null = null // OSC 14 / 114
-  let highlightBgColor: CellColor | null = null // OSC 17 / 117
-  let highlightFgColor: CellColor | null = null // OSC 19 / 119
+  let palette256: Color[] = buildPalette256()
+  let defaultFgColor: Color | null = null // OSC 10 / 110
+  let defaultBgColor: Color | null = null // OSC 11 / 111
+  let cursorColor: Color | null = null // OSC 12 / 112
+  const specialColors: Map<number, Color> = new Map() // OSC 5 / 105 (0=bold, 1=ul, 2=blink, 3=reverse, 4=italic)
+  let pointerFgColor: Color | null = null // OSC 13 / 113
+  let pointerBgColor: Color | null = null // OSC 14 / 114
+  let highlightBgColor: Color | null = null // OSC 17 / 117
+  let highlightFgColor: Color | null = null // OSC 19 / 119
   type ColorStateSnapshot = ScreenColorStateSnapshot
   const colorStack: ColorStateSnapshot[] = []
 
-  function cloneColor(c: CellColor | null): CellColor | null {
+  function cloneColor(c: Color | null): Color | null {
     return c ? { ...c } : null
   }
 
@@ -1336,7 +1324,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
   }
 
-  function assertSnapshot(snapshot: ScreenSnapshot): void {
+  function assertSnapshot(snapshot: Snapshot): void {
     const value: unknown = snapshot
     if (!isRecord(value)) throw new TypeError("Invalid vterm snapshot")
     if (value.version !== 1) {
@@ -3193,7 +3181,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
   }
 
-  function parseExtendedColor(params: number[], startIndex: number): { color: CellColor; nextIndex: number } | null {
+  function parseExtendedColor(params: number[], startIndex: number): { color: Color; nextIndex: number } | null {
     if (startIndex + 1 >= params.length) return null
 
     const type = params[startIndex + 1]
@@ -3203,7 +3191,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       // serializer re-emits the indexed form. A malformed out-of-range N has no
       // palette entry, so fall back to bare black with NO index (never emit `x8;5;>255`).
       const entry = palette256[idx]
-      const color: CellColor = entry ? { ...entry, index: idx } : { r: 0, g: 0, b: 0 }
+      const color: Color = entry ? { ...entry, index: idx } : { r: 0, g: 0, b: 0 }
       return { color, nextIndex: startIndex + 3 }
     } else if (type === 2 && startIndex + 4 < params.length) {
       return {
@@ -3219,7 +3207,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   }
 
   /** Parse extended color from colon sub-parameters (e.g., 38:2:R:G:B or 38:5:N) */
-  function parseExtendedColorFromSubs(subs: number[]): CellColor | null {
+  function parseExtendedColorFromSubs(subs: number[]): Color | null {
     if (subs.length < 3) return null
     const type = subs[1]
     if (type === 5 && subs.length >= 3) {
@@ -4524,7 +4512,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   // ── Snapshot / restore ──
 
-  function snapshot(): ScreenSnapshot {
+  function snapshot(): Snapshot {
     return {
       version: 1,
       cols,
@@ -4615,7 +4603,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
   }
 
-  function restore(snapshotValue: ScreenSnapshot): void {
+  function restore(snapshotValue: Snapshot): void {
     assertSnapshot(snapshotValue)
 
     cols = snapshotValue.cols
@@ -4733,7 +4721,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     return stripCellColorIndex(r.getCellRaw(col))
   }
 
-  function getLine(row: number): ScreenCell[] {
+  function getRow(row: number): ScreenCell[] {
     const r = grid[row]
     if (!r) return makeRow(cols).toCells()
     return r.toCells().map(stripCellColorIndex)
@@ -5133,8 +5121,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     snapshot,
     restore,
     getCell,
-    getRow: getLine,
-    getLine,
+    getRow,
     getText,
     getScrollbackText,
     getTextRange,
@@ -5145,7 +5132,6 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     firstRetainedRow,
     takeDirty,
     getCursor: () => ({ col: curX, row: curY }),
-    getCursorPosition: () => ({ x: curX, y: curY }),
     getCursorVisible: () => curVisible,
     getCursorShape: () => cursorShape,
     getCursorBlinking: () => cursorBlinking,
@@ -5266,7 +5252,7 @@ function serializeUnderlineParam(style: UnderlineStyle): string {
   }
 }
 
-function serializeColorEq(a: CellColor | null, b: CellColor | null): boolean {
+function serializeColorEq(a: Color | null, b: Color | null): boolean {
   if (a === null || b === null) return a === b
   // Include the palette-origin index in equality: two colors with identical RGB
   // but different provenance (e.g. `31` → {128,0,0,index:1} vs the true-RGB
@@ -5318,7 +5304,7 @@ function serializePenIsDefault(pen: SerializePen): boolean {
   return serializePenEq(pen, SERIALIZE_DEFAULT_PEN)
 }
 
-function serializeColorParams(prefix: string, defaultCode: string, color: CellColor | null): string {
+function serializeColorParams(prefix: string, defaultCode: string, color: Color | null): string {
   if (color === null) return defaultCode
   const idx = color.index
   if (idx !== undefined && idx >= 0 && idx <= 255) {
@@ -5505,13 +5491,13 @@ const SERIALIZE_DECSET_FLAGS = [
   ["altScroll", 1007],
   ["bracketedPaste", 2004],
   ["colorSchemeReporting", 2031],
-] as const satisfies readonly (readonly [keyof ScreenSnapshot["modes"], number])[]
+] as const satisfies readonly (readonly [keyof Snapshot["modes"], number])[]
 
 /** Default palette shared by every serialize call (read-only baseline for OSC 4 diffs). */
-const SERIALIZE_DEFAULT_PALETTE: readonly CellColor[] = buildPalette256()
+const SERIALIZE_DEFAULT_PALETTE: readonly Color[] = buildPalette256()
 
 /** `rgb:RR/GG/BB` — the XParseColor spelling vterm's own OSC parser round-trips exactly. */
-function serializeColorSpec(color: CellColor): string {
+function serializeColorSpec(color: Color): string {
   const hex = (v: number): string => v.toString(16).padStart(2, "0")
   return `rgb:${hex(color.r)}/${hex(color.g)}/${hex(color.b)}`
 }
@@ -5542,7 +5528,7 @@ function serializeTabStopsAreDefault(stops: readonly number[], cols: number): bo
  * color stack, and parser/pending-wrap/mid-parse state are unserializable to
  * a VT byte stream by design — the binary snapshot carries them.
  */
-export function serializeSnapshot(snapshot: ScreenSnapshot, options: SerializeOptions = {}): string {
+export function serializeSnapshot(snapshot: Snapshot, options: SerializeOptions = {}): string {
   const hyperlinks = options.hyperlinks !== false
   const excluded = new Set(options.excludeModes ?? [])
   const rows = snapshot.rows

@@ -8,10 +8,6 @@ export {
   type Snapshot,
   type Color,
   type Cursor,
-  // §9 deprecated aliases (ride the migration window; @deprecated tags live on the declarations)
-  type ScreenSnapshot,
-  type CellColor,
-  type ScreenSnapshot as VtermScreenSnapshot,
   type ScreenAttrsSnapshot as VtermScreenAttrsSnapshot,
   type ScreenColorStateSnapshot as VtermScreenColorStateSnapshot,
   type ScreenParserState as VtermScreenParserState,
