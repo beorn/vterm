@@ -2318,8 +2318,13 @@ describe("snapshot / restore", () => {
       esc: "",
       osc: "",
       dcs: "",
+      dcsOverflow: false,
+      dcsReceivedLength: 0,
       dcsStart: { row: 0, col: 0 },
       apc: "",
+      apcOverflow: false,
+      apcReceivedLength: 0,
+      apcStart: { row: 0, col: 0 },
       utf8PendingBytes: [],
     })
   })
