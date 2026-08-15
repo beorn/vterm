@@ -4018,12 +4018,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     emitParserEvent({ kind: sequence, data, row, col })
   }
 
-  function emitStringOverflow(
-    sequence: "apc" | "dcs",
-    receivedLength: number,
-    row: number,
-    col: number,
-  ): void {
+  function emitStringOverflow(sequence: "apc" | "dcs", receivedLength: number, row: number, col: number): void {
     if (parserListeners.size === 0) return
     flushPrintRun()
     emitParserEvent({
