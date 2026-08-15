@@ -19,6 +19,7 @@ export {
   type TerminalOp,
   type ParserEvent,
   type DirtyRegion,
+  DEFAULT_MAX_STRING_SEQUENCE_LENGTH,
   // Reactive read plane (§4 signals facade)
   type ReadSignal,
   type ScreenSignals,

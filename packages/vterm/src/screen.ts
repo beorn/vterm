@@ -90,7 +90,17 @@ export interface ScreenOptions {
   scrollbackLimit?: number
   /** Callback for DA1/DA2/DSR responses — write these back to the PTY */
   onResponse?: (data: string) => void
+  /**
+   * Maximum UTF-16 code units retained for one APC or DCS string sequence.
+   * Image protocols use ASCII/base64 payloads, so this is also their byte
+   * bound. Longer sequences are consumed without buffering or dispatch and
+   * surface one typed `string-overflow` parser event at their terminator.
+   */
+  maxStringSequenceLength?: number
 }
+
+/** Default retained payload bound for one APC/DCS sequence (16 MiB of ASCII/base64). */
+export const DEFAULT_MAX_STRING_SEQUENCE_LENGTH = 16 * 1024 * 1024
 
 export interface SemanticZone {
   type: "prompt" | "command" | "output"
@@ -241,7 +251,12 @@ export interface Snapshot {
     osc: string
     dcs: string
     dcsStart: { row: number; col: number }
+    dcsReceivedLength?: number
+    dcsOverflow?: boolean
     apc: string
+    apcStart?: { row: number; col: number }
+    apcReceivedLength?: number
+    apcOverflow?: boolean
     utf8PendingBytes: number[]
   }
   unicode: {
@@ -290,8 +305,12 @@ export type TerminalOp = { type: "output"; data: Uint8Array | string } | { type:
  *               charset/`#` designators); `final` is the dispatching byte, `intermediates`
  *               carries the `(`/`)`/`#` designator byte when present.
  *
- * DCS and APC string sequences are not (yet) surfaced. A listener MUST NOT throw — taps are
- * fail-loud: an exception propagates out of the write call (the engine state stays consistent).
+ * - `dcs` / `apc` — a complete bounded string sequence with the guest-local cursor anchor at
+ *                   sequence start. Payloads beyond `maxStringSequenceLength` are not dispatched;
+ *                   their terminator emits one typed `string-overflow` event instead.
+ *
+ * A listener MUST NOT throw — taps are fail-loud: an exception propagates out of the write call
+ * (the engine state stays consistent).
  */
 export type ParserEvent =
   | { kind: "print"; text: string }
@@ -299,6 +318,16 @@ export type ParserEvent =
   | { kind: "csi"; final: string; params: number[]; prefix?: string; intermediates?: string }
   | { kind: "osc"; code: number; data: string }
   | { kind: "esc"; final: string; intermediates?: string }
+  | { kind: "apc"; data: string; row: number; col: number }
+  | { kind: "dcs"; data: string; row: number; col: number }
+  | {
+      kind: "string-overflow"
+      sequence: "apc" | "dcs"
+      maxLength: number
+      receivedLength: number
+      row: number
+      col: number
+    }
 
 /**
  * Accumulated per-row damage since the previous {@link Screen.takeDirty} call — the PULL-plane
@@ -1075,6 +1104,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let rows = options.rows ?? 24
   let scrollbackLimit = options.scrollbackLimit ?? 1000
   const onResponse = options.onResponse
+  const maxStringSequenceLength = options.maxStringSequenceLength ?? DEFAULT_MAX_STRING_SEQUENCE_LENGTH
+  if (!Number.isSafeInteger(maxStringSequenceLength) || maxStringSequenceLength < 0) {
+    throw new RangeError("maxStringSequenceLength must be a non-negative safe integer")
+  }
 
   // Main and alternate screen buffers (packed rows; see makePackedRow).
   let mainGrid: PackedRow[] = makeGrid(cols, rows)
@@ -1449,7 +1482,20 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     assertRecord("parser.dcsStart", parser.dcsStart)
     assertInteger("parser.dcsStart.row", parser.dcsStart.row)
     assertInteger("parser.dcsStart.col", parser.dcsStart.col)
+    if (parser.dcsReceivedLength !== undefined) {
+      assertInteger("parser.dcsReceivedLength", parser.dcsReceivedLength, 0)
+    }
+    if (parser.dcsOverflow !== undefined) assertBoolean("parser.dcsOverflow", parser.dcsOverflow)
     assertString("parser.apc", parser.apc)
+    if (parser.apcStart !== undefined) {
+      assertRecord("parser.apcStart", parser.apcStart)
+      assertInteger("parser.apcStart.row", parser.apcStart.row)
+      assertInteger("parser.apcStart.col", parser.apcStart.col)
+    }
+    if (parser.apcReceivedLength !== undefined) {
+      assertInteger("parser.apcReceivedLength", parser.apcReceivedLength, 0)
+    }
+    if (parser.apcOverflow !== undefined) assertBoolean("parser.apcOverflow", parser.apcOverflow)
     if (!Array.isArray(parser.utf8PendingBytes)) {
       throw new TypeError("Invalid vterm snapshot parser.utf8PendingBytes")
     }
@@ -1558,7 +1604,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let dcsBuf = ""
   let dcsStartRow = 0
   let dcsStartCol = 0
+  let dcsReceivedLength = 0
+  let dcsOverflow = false
   let apcBuf = ""
+  let apcStartRow = 0
+  let apcStartCol = 0
+  let apcReceivedLength = 0
+  let apcOverflow = false
 
   // Observation taps (opt-in; zero-overhead when no listener is registered). `opListeners`
   // observe the coarse WRITE ops (symmetric with the Hab journal); `parserListeners` observe
@@ -3875,7 +3927,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     dcsBuf = ""
     dcsStartRow = 0
     dcsStartCol = 0
+    dcsReceivedLength = 0
+    dcsOverflow = false
     apcBuf = ""
+    apcStartRow = 0
+    apcStartCol = 0
+    apcReceivedLength = 0
+    apcOverflow = false
     utf8PendingBytes = []
     semanticZones = []
     mainSoftWrapped = new Array(rows).fill(false)
@@ -3954,6 +4012,76 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     emitParserEvent(ev)
   }
 
+  function emitStringEvent(sequence: "apc" | "dcs", data: string, row: number, col: number): void {
+    if (parserListeners.size === 0) return
+    flushPrintRun()
+    emitParserEvent({ kind: sequence, data, row, col })
+  }
+
+  function emitStringOverflow(
+    sequence: "apc" | "dcs",
+    receivedLength: number,
+    row: number,
+    col: number,
+  ): void {
+    if (parserListeners.size === 0) return
+    flushPrintRun()
+    emitParserEvent({
+      kind: "string-overflow",
+      sequence,
+      maxLength: maxStringSequenceLength,
+      receivedLength,
+      row,
+      col,
+    })
+  }
+
+  function appendDCS(ch: string): void {
+    dcsReceivedLength += ch.length
+    if (dcsOverflow) return
+    if (dcsReceivedLength > maxStringSequenceLength) {
+      dcsOverflow = true
+      dcsBuf = ""
+      return
+    }
+    dcsBuf += ch
+  }
+
+  function appendAPC(ch: string): void {
+    apcReceivedLength += ch.length
+    if (apcOverflow) return
+    if (apcReceivedLength > maxStringSequenceLength) {
+      apcOverflow = true
+      apcBuf = ""
+      return
+    }
+    apcBuf += ch
+  }
+
+  function finishDCS(): void {
+    if (dcsOverflow) {
+      emitStringOverflow("dcs", dcsReceivedLength, dcsStartRow, dcsStartCol)
+    } else {
+      handleDCS(dcsBuf)
+      emitStringEvent("dcs", dcsBuf, dcsStartRow, dcsStartCol)
+    }
+    dcsBuf = ""
+    dcsReceivedLength = 0
+    dcsOverflow = false
+  }
+
+  function finishAPC(): void {
+    if (apcOverflow) {
+      emitStringOverflow("apc", apcReceivedLength, apcStartRow, apcStartCol)
+    } else {
+      handleAPC(apcBuf)
+      emitStringEvent("apc", apcBuf, apcStartRow, apcStartCol)
+    }
+    apcBuf = ""
+    apcReceivedLength = 0
+    apcOverflow = false
+  }
+
   function emitOp(op: TerminalOp): void {
     for (const listener of opListeners) listener(op)
   }
@@ -4025,6 +4153,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             dcsBuf = ""
             dcsStartRow = curY
             dcsStartCol = curX
+            dcsReceivedLength = 0
+            dcsOverflow = false
           } else if (ch === "c") {
             // RIS - Reset to Initial State
             fullReset()
@@ -4122,6 +4252,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             // APC - Application Program Command
             parserState = "apc"
             apcBuf = ""
+            apcStartRow = curY
+            apcStartCol = curX
+            apcReceivedLength = 0
+            apcOverflow = false
           } else {
             // Unknown escape — return to ground
             parserState = "ground"
@@ -4235,10 +4369,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             parserState = "dcs_st"
           } else if (code === 0x07) {
             // BEL terminates DCS
-            handleDCS(dcsBuf)
+            finishDCS()
             parserState = "ground"
           } else {
-            dcsBuf += ch
+            appendDCS(ch)
           }
           break
 
@@ -4246,7 +4380,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           // Expecting backslash to complete ST
           if (ch === "\\") {
             // ST (String Terminator) — end of DCS
-            handleDCS(dcsBuf)
+            finishDCS()
+          } else {
+            dcsBuf = ""
+            dcsReceivedLength = 0
+            dcsOverflow = false
           }
           parserState = "ground"
           break
@@ -4263,17 +4401,21 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             parserState = "apc_st"
           } else if (code === 0x07) {
             // BEL terminates APC
-            handleAPC(apcBuf)
+            finishAPC()
             parserState = "ground"
           } else {
-            apcBuf += ch
+            appendAPC(ch)
           }
           break
 
         case "apc_st":
           if (ch === "\\") {
             // ST (String Terminator) — end of APC
-            handleAPC(apcBuf)
+            finishAPC()
+          } else {
+            apcBuf = ""
+            apcReceivedLength = 0
+            apcOverflow = false
           }
           parserState = "ground"
           break
@@ -4591,7 +4733,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         osc: oscBuf,
         dcs: dcsBuf,
         dcsStart: { row: dcsStartRow, col: dcsStartCol },
+        dcsReceivedLength,
+        dcsOverflow,
         apc: apcBuf,
+        apcStart: { row: apcStartRow, col: apcStartCol },
+        apcReceivedLength,
+        apcOverflow,
         utf8PendingBytes: [...utf8PendingBytes],
       },
       unicode: {
@@ -4680,7 +4827,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     dcsBuf = snapshotValue.parser.dcs
     dcsStartRow = snapshotValue.parser.dcsStart.row
     dcsStartCol = snapshotValue.parser.dcsStart.col
+    dcsReceivedLength = snapshotValue.parser.dcsReceivedLength ?? dcsBuf.length
+    dcsOverflow = snapshotValue.parser.dcsOverflow ?? false
     apcBuf = snapshotValue.parser.apc
+    apcStartRow = snapshotValue.parser.apcStart?.row ?? curY
+    apcStartCol = snapshotValue.parser.apcStart?.col ?? curX
+    apcReceivedLength = snapshotValue.parser.apcReceivedLength ?? apcBuf.length
+    apcOverflow = snapshotValue.parser.apcOverflow ?? false
     utf8PendingBytes = [...snapshotValue.parser.utf8PendingBytes]
     charsetG0 = snapshotValue.unicode.charsetG0
     lastChar = snapshotValue.unicode.lastChar

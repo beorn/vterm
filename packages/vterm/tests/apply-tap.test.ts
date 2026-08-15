@@ -28,8 +28,12 @@ const ESC = "\x1b"
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
-function mkScreen(cols = 40, rows = 8): VtermScreen {
-  return createVtermScreen({ cols, rows })
+function mkScreen(
+  cols = 40,
+  rows = 8,
+  options: { maxStringSequenceLength?: number; onResponse?: (data: string) => void } = {},
+): VtermScreen {
+  return createVtermScreen({ cols, rows, ...options })
 }
 
 function bytes(s: string): Uint8Array {
@@ -219,6 +223,52 @@ describe("tapParser — the parsed-action observation plane", () => {
       { kind: "esc", final: "D" },
       { kind: "esc", final: "0", intermediates: "(" },
     ])
+  })
+
+  test("reports completed APC and DCS payloads at their guest-local cursor anchor", () => {
+    const screen = mkScreen()
+    const events = tapEvents(screen)
+
+    screen.process(bytes(`${ESC}[3;5H${ESC}_Gf=100,a=T;AAAA${ESC}\\${ESC}Pq~${ESC}\\`))
+
+    expect(events.filter((event) => event.kind === "apc" || event.kind === "dcs")).toEqual([
+      { kind: "apc", data: "Gf=100,a=T;AAAA", row: 2, col: 4 },
+      { kind: "dcs", data: "q~", row: 2, col: 4 },
+    ])
+  })
+
+  test("bounds APC and DCS payloads and emits a typed loud drop after completion", () => {
+    const responses: string[] = []
+    const screen = mkScreen(40, 8, {
+      maxStringSequenceLength: 4,
+      onResponse: (data) => responses.push(data),
+    })
+    const events = tapEvents(screen)
+
+    screen.process(bytes(`${ESC}_Ga=q,i=1;AAAA${ESC}\\${ESC}Pq12345${ESC}\\Z`))
+
+    expect(events.filter((event) => event.kind === "apc" || event.kind === "dcs")).toEqual([])
+    expect(events.filter((event) => event.kind === "string-overflow")).toEqual([
+      {
+        kind: "string-overflow",
+        sequence: "apc",
+        maxLength: 4,
+        receivedLength: 13,
+        row: 0,
+        col: 0,
+      },
+      {
+        kind: "string-overflow",
+        sequence: "dcs",
+        maxLength: 4,
+        receivedLength: 6,
+        row: 0,
+        col: 0,
+      },
+    ])
+    expect(responses).toEqual([])
+    expect(screen.getSixelImages()).toEqual([])
+    expect(events.at(-1)).toEqual({ kind: "print", text: "Z" })
   })
 
   test("emits parsed actions AFTER they are applied (state already reflects the event)", () => {
