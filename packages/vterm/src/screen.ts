@@ -578,7 +578,7 @@ function emptyCell(): ScreenCell {
  * case), so the read path allocates nothing there.
  */
 function stripColorIndex(c: Color | null): Color | null {
-  if (c === null || c.index === undefined) return c
+  if (c?.index === undefined) return c
   return { r: c.r, g: c.g, b: c.b }
 }
 
@@ -1589,6 +1589,27 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let softWrapped = mainSoftWrapped
   // Parallel to `scrollback`: the departing row's soft-wrap bit, captured at scroll-out
   let scrollbackSoftWrapped: boolean[] = []
+
+  /**
+   * Drop every banked scrollback row AND its soft-wrap flag.
+   *
+   * These two arrays are one data structure wearing two names, and nothing in
+   * the type system says so. `ESC [ 3 J` (erase display + scrollback) once
+   * emptied the rows and left the flags, which diverged the pair permanently
+   * by however many rows were banked at that instant. Every later push
+   * extended both and preserved the gap, so the snapshot codec refused to
+   * write a frame — `soft-wrap length 3580 != rowCount 2103` — and the seat
+   * kept running with its recording silently ended
+   * (@i/5-agent-loop/vterm-codec-ends-recording).
+   *
+   * `ESC [ 3 J` is not exotic: `clear` emits it on a modern terminal. Every
+   * clear goes through here so the pairing is structural rather than
+   * remembered at each call site.
+   */
+  function clearScrollback(): void {
+    scrollback.length = 0
+    scrollbackSoftWrapped.length = 0
+  }
 
   // Last printed character for REP
   let lastChar = ""
@@ -2807,7 +2828,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           eraseCells(row, 0, row, cols - 1)
         }
         if (mode === 3) {
-          scrollback.length = 0
+          clearScrollback()
         }
         markAllDirty() // full clear (mode 3 also drops scrollback) — structural
         break
@@ -4509,7 +4530,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         // Empty logical line — produce one empty row
         outRows.push(makeRow(newCols))
         outWrapped.push(false)
-        if (track !== undefined && track.line === li) {
+        if (track?.line === li) {
           tracked = { row: outRows.length - 1, col: Math.min(track.offset, newCols - 1) }
         }
         continue
@@ -4526,7 +4547,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             // Wide char doesn't fit — leave rest of row empty, wrap to next
             break
           }
-          if (track !== undefined && track.line === li && pos === track.offset) {
+          if (track?.line === li && pos === track.offset) {
             tracked = { row: outRows.length, col }
           }
           row.setCellRaw(col, cell)
@@ -4538,7 +4559,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         const moreContent = pos < lineLen
         outRows.push(row)
         outWrapped.push(moreContent) // soft-wrapped if there's more content to come
-        if (!moreContent && track !== undefined && track.line === li && tracked === null) {
+        if (!moreContent && track?.line === li && tracked === null) {
           const extra = track.offset - lineLen
           tracked = { row: outRows.length - 1, col: Math.min(newCols - 1, col + extra) }
         }

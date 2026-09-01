@@ -381,4 +381,90 @@ describe("snapshot-codec — size", () => {
     expect(encoded.byteLength).toBeLessThan(jsonBytes / 50)
     expect(encoded.byteLength).toBeLessThan(8 * 1024 * 1024)
   })
+
+  // ── ED 3 (erase scrollback) — the production recording-death bug ──────
+
+  describe("scrollback soft-wrap stays paired with scrollback rows", () => {
+    /**
+     * The live failure this reproduces, verbatim from a seat's own pane:
+     *
+     *   ag inhab: @dev/7 stopped recording into <state-root>/run/sessions/...
+     *   after a failed lifecycle append: vterm snapshot codec: soft-wrap
+     *   length 3580 != rowCount 2103
+     *   — the seat keeps running and its recording ends here
+     *
+     * `ESC [ 3 J` (ED mode 3, "erase display AND scrollback") dropped the
+     * scrollback rows but left `scrollbackSoftWrapped` at its old length, so
+     * the two arrays diverged permanently by however many rows were banked at
+     * that moment. Every later push extended BOTH, preserving the gap — which
+     * is why the production numbers differ by exactly the pre-clear depth
+     * (3580 - 2103 = 1477) rather than by anything about the current screen.
+     *
+     * `ESC [ 3 J` is not exotic: `clear` on a modern terminal emits it, and so
+     * do plenty of TUIs on startup. The codec did its job — it refused to
+     * write a corrupt frame and said exactly why. The defect was upstream of
+     * it, in the screen.
+     */
+    test("ED 3 clears scrollback and its soft-wrap flags together", () => {
+      const screen = mkScreen(20, 4)
+      // Bank scrollback that includes soft-wrapped (over-long) lines, so the
+      // flag array holds a mix of true and false rather than all-false.
+      feed(screen, Array.from({ length: 30 }, (_, i) => `${"x".repeat(i % 25)}\r\n`).join(""))
+      const banked = screen.getScrollbackLength()
+      expect(banked).toBeGreaterThan(0)
+
+      feed(screen, `${ESC}[3J`)
+      expect(screen.getScrollbackLength()).toBe(0)
+
+      const cleared = screen.snapshot()
+      expect(cleared.scrollbackSoftWrapped).toHaveLength(cleared.scrollback.length)
+
+      // And the divergence must not reappear as the seat keeps working.
+      feed(screen, Array.from({ length: 40 }, (_, i) => `${"y".repeat(i % 25)}\r\n`).join(""))
+      const after = screen.snapshot()
+      expect(after.scrollbackSoftWrapped).toHaveLength(after.scrollback.length)
+      roundTrip(after)
+    })
+
+    test("a deep post-clear scrollback still encodes (the 1477/2103 shape, at depth)", () => {
+      // The production screen was not tiny: ~1477 rows banked before the clear
+      // and ~2103 after it. Reproduce that depth rather than a toy screen —
+      // the codec chunks and interns, and a shallow case can pass while a deep
+      // one trips a boundary.
+      const screen = mkScreen(80, 24, 4000)
+      feed(screen, Array.from({ length: 1477 }, (_, i) => `pre ${String(i)} ${"a".repeat(i % 90)}\r\n`).join(""))
+      expect(screen.getScrollbackLength()).toBeGreaterThan(1400)
+
+      feed(screen, `${ESC}[3J`)
+      feed(screen, Array.from({ length: 2103 }, (_, i) => `post ${String(i)} ${"b".repeat(i % 90)}\r\n`).join(""))
+
+      const snapshot = screen.snapshot()
+      expect(snapshot.scrollbackSoftWrapped).toHaveLength(snapshot.scrollback.length)
+      // The exact call that died in production: encode the frame.
+      expect(() => encodeScreenSnapshotBinary(snapshot)).not.toThrow()
+      roundTrip(snapshot)
+    })
+
+    test("ED 3 then a REFLOWING resize round-trips (clear + rewrap together)", () => {
+      // Reflow rebuilds main/alt soft-wrap arrays; ED 3 rebuilds the
+      // scrollback's. Exercise both in one session so a fix to either cannot
+      // hide a gap in the other.
+      const screen = mkScreen(40, 6, 2000)
+      feed(screen, Array.from({ length: 200 }, (_, i) => `${"w".repeat(i % 70)}\r\n`).join(""))
+      feed(screen, `${ESC}[3J`)
+      feed(screen, Array.from({ length: 200 }, (_, i) => `${"z".repeat(i % 70)}\r\n`).join(""))
+      for (const [c, r] of [
+        [17, 6],
+        [95, 10],
+        [40, 6],
+      ] as const) {
+        screen.resize(c, r)
+        const snap = screen.snapshot()
+        expect(snap.scrollbackSoftWrapped).toHaveLength(snap.scrollback.length)
+        expect(snap.main.softWrapped).toHaveLength(snap.main.grid.length)
+        expect(snap.alt.softWrapped).toHaveLength(snap.alt.grid.length)
+        roundTrip(snap)
+      }
+    })
+  })
 })
