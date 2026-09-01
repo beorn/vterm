@@ -435,6 +435,14 @@ The **reactive** counterpart is `signals.damage$` (see [Signals](#signals--the-r
 
 **Use vterm.js** when you need everything — 100% coverage of the [terminfo.dev](https://terminfo.dev) feature matrix.
 
+## vterm.js and xterm.js
+
+[xterm.js](https://www.npmjs.com/package/@xterm/xterm) is the standard for putting a terminal on a web page — DOM, canvas, and WebGL renderers, a large addon ecosystem, and the terminal inside VS Code. When the job is rendering a terminal to a human, reach for xterm.js. We do: [Termless](https://termless.dev)'s own `@termless/web-player`, which plays back recorded terminal sessions in the browser, is built directly on `@xterm/xterm`.
+
+vterm.js is for the opposite case: nothing ever gets painted. It's headless-first — the terminal as a **readable data structure**, not a rendered surface. Zero dependencies, pure TypeScript, full VT/ECMA-48/xterm standards coverage, a binary snapshot codec for exact state capture, a reactive read plane (`screen.signals`), absolute-row scrollback addressing, and semantic-zone detection (OSC 133 / OSC 633 prompt/command/output). That combination is aimed at testing, session recording, audit trails, and AI-agent infrastructure — consumers that need to know exactly what a terminal contains without ever drawing it.
+
+Because vterm.js makes no display claims, it's held to a stricter standard instead: engine conformance, graded publicly and continuously in [Termless](https://termless.dev)'s differential conformance corpus against xterm.js, Ghostty, and neovim's libvterm. Current per-engine results and every known gap live in the ratchet ledger (`known-gaps.json`) — it's two-way: an unlisted failure fails the build, and a listed gap that starts passing fails too. Full results are public at [termless.dev/advanced/conformance-corpus](https://termless.dev/advanced/conformance-corpus).
+
 ## See also
 
 - [vt100.js](../vt100/) — VT100-era emulator (smaller, focused)
