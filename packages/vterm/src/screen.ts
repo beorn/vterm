@@ -399,6 +399,8 @@ export interface TerminalModes {
   focusTracking: boolean
   originMode: boolean
   insertMode: boolean
+  /** LNM — LF also returns the carriage (ECMA-48 mode 20). */
+  newLineMode: boolean
   reverseVideo: boolean
   syncOutput: boolean
   leftRightMargin: boolean
@@ -1160,6 +1162,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let focusTracking = false
   let originMode = false
   let insertMode = false
+  let newLineMode = false
   let reverseVideo = false
   let syncOutput = false
 
@@ -1824,6 +1827,29 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
   }
 
+  /**
+   * Move the cursor down one line, scrolling ONLY at the region's bottom edge.
+   *
+   * `curY++; if (curY > scrollBottom) { curY = scrollBottom; scrollUp() }`
+   * looks equivalent and is not. From a row BELOW the scrolling region it
+   * clamps the cursor BACKWARDS into the region and scrolls a region the
+   * cursor was never in — with DECSTBM at 1;10, a linefeed from row 19 landed
+   * on row 9 instead of row 20.
+   *
+   * DECSTBM confines SCROLLING, not movement: a cursor outside the region
+   * simply walks the screen.
+   */
+  function lineFeedDown(): void {
+    if (curY === scrollBottom) scrollUp(scrollTop, scrollBottom)
+    else if (curY < rows - 1) curY++
+  }
+
+  /** RI's mirror: scroll only at the region's top edge, else walk up. */
+  function reverseIndexUp(): void {
+    if (curY === scrollTop) scrollDown(scrollTop, scrollBottom)
+    else if (curY > 0) curY--
+  }
+
   // ── Scrolling ──
 
   function scrollUp(top: number, bottom: number): void {
@@ -2480,11 +2506,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       case "h": // SM - Set Mode (non-private)
         for (const code of parts) {
           if (code === 4) insertMode = true // IRM - Insert/Replace Mode
+          if (code === 20) newLineMode = true // LNM - Line Feed / New Line Mode
         }
         break
       case "l": // RM - Reset Mode (non-private)
         for (const code of parts) {
           if (code === 4) insertMode = false
+          if (code === 20) newLineMode = false
         }
         break
       case "s": // SCP - Save Cursor Position / DECSLRM when left/right margin mode active
@@ -2638,6 +2666,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             break
           case 4:
             value = insertMode ? 1 : 2
+            break
+          case 20:
+            value = newLineMode ? 1 : 2
             break
           case 3:
             value = decColumnMode ? 1 : 2
@@ -3854,6 +3885,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   function softReset(): void {
     // Reset modes to defaults
     insertMode = false
+    newLineMode = false
     originMode = false
     autoWrap = true
     curVisible = true
@@ -3917,6 +3949,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     focusTracking = false
     originMode = false
     insertMode = false
+    newLineMode = false
     reverseVideo = false
     syncOutput = false
     kittyKeyboardFlags = 0
@@ -4145,11 +4178,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           } else if (code === 0x0a || code === 0x0b || code === 0x0c) {
             // LF, VT, FF — linefeed (hard break — clear any soft-wrap flag)
             softWrapped[curY] = false
-            curY++
-            if (curY > scrollBottom) {
-              curY = scrollBottom
-              scrollUp(scrollTop, scrollBottom)
-            }
+            lineFeedDown()
+            // LNM: LF/VT/FF also return the carriage. IND (ESC D) is NOT
+            // affected by LNM, which is why this lives here and not in
+            // lineFeedDown().
+            if (newLineMode) curX = 0
             emitExecute(code)
           } else if (code === 0x0d) {
             // CR - Carriage Return
@@ -4193,20 +4226,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             emitEsc("c", "")
           } else if (ch === "D") {
             // IND - Index (move cursor down, scroll if needed)
-            curY++
-            if (curY > scrollBottom) {
-              curY = scrollBottom
-              scrollUp(scrollTop, scrollBottom)
-            }
+            lineFeedDown()
             parserState = "ground"
             emitEsc("D", "")
           } else if (ch === "M") {
             // RI - Reverse Index (move cursor up, scroll if needed)
-            curY--
-            if (curY < scrollTop) {
-              curY = scrollTop
-              scrollDown(scrollTop, scrollBottom)
-            }
+            reverseIndexUp()
             parserState = "ground"
             emitEsc("M", "")
           } else if (ch === "7") {
@@ -4731,6 +4756,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         focusTracking,
         origin: originMode,
         insert: insertMode,
+        newLine: newLineMode,
         reverseVideo,
         syncOutput,
         kittyKeyboardFlags,
@@ -4827,6 +4853,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     focusTracking = snapshotValue.modes.focusTracking
     originMode = snapshotValue.modes.origin
     insertMode = snapshotValue.modes.insert
+    newLineMode = snapshotValue.modes.newLine ?? false
     reverseVideo = snapshotValue.modes.reverseVideo
     syncOutput = snapshotValue.modes.syncOutput
     kittyKeyboardFlags = snapshotValue.modes.kittyKeyboardFlags
@@ -5039,6 +5066,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         return originMode
       case "insertMode":
         return insertMode
+      case "newLineMode":
+        return newLineMode
       case "reverseVideo":
         return reverseVideo
       case "syncOutput":
@@ -5153,6 +5182,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       focusTracking,
       originMode,
       insertMode,
+      newLineMode,
       reverseVideo,
       syncOutput,
       leftRightMargin: leftRightMarginMode,
@@ -5178,6 +5208,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       a.focusTracking === b.focusTracking &&
       a.originMode === b.originMode &&
       a.insertMode === b.insertMode &&
+      a.newLineMode === b.newLineMode &&
       a.reverseVideo === b.reverseVideo &&
       a.syncOutput === b.syncOutput &&
       a.leftRightMargin === b.leftRightMargin &&
