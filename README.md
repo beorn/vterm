@@ -69,7 +69,7 @@ snapshot()       a serializable value: the whole screen at one instant
 consumers        assert on it · render it · store it as a restore keyframe
 ```
 
-Read each arrow as *hands a value to*, not as *depends on*. The emulator never learns which of the three byte sources it is being fed, and that is the property the layers above are built on.
+Read each arrow as _hands a value to_, not as _depends on_. The emulator never learns which of the three byte sources it is being fed, and that is the property the layers above are built on.
 
 **A test harness wraps a screen as a backend.** [Termless](https://termless.dev) implements its `TerminalBackend` interface over `createVtermScreen`, which is what lets its region selectors and matchers query a vterm.js screen the same way they query xterm.js, Ghostty, or Alacritty. See the [backend guide](https://termless.dev/guide/backends).
 
