@@ -2124,6 +2124,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
     markScreenRowDirty(curY)
     curX += charWidth
+    // With autowrap OFF there is no deferred wrap to represent, so the cursor
+    // stays ON the last column instead of moving one past it. Guarded on
+    // `!autoWrap` deliberately: with autowrap ON, `curX === wrapBoundary` IS
+    // our pending-wrap representation (ruled 2026-09-01 — vterm keeps it),
+    // and clamping unconditionally would erase that state.
+    if (!autoWrap && curX >= wrapBoundary) curX = wrapBoundary - 1
     lastChar = ch
   }
 
