@@ -55,6 +55,34 @@ npm test          # Run all tests
 npm run typecheck # TypeScript check
 ```
 
+## How it connects
+
+These are libraries, not applications: bytes in, a queryable screen out. Nothing here opens a PTY, keeps a clock, or writes a file. Everything downstream is a different **read** of the same screen.
+
+```text
+bytes            a live PTY, a test fixture, or a stored session
+  ↓
+vterm.js         the screen model — parse, cells, cursor, modes
+  ↓
+snapshot()       a serializable value: the whole screen at one instant
+  ↓
+consumers        assert on it · render it · store it as a restore keyframe
+```
+
+Read each arrow as *hands a value to*, not as *depends on*. The emulator never learns which of the three byte sources it is being fed, and that is the property the layers above are built on.
+
+**A test harness wraps a screen as a backend.** [Termless](https://termless.dev) implements its `TerminalBackend` interface over `createVtermScreen`, which is what lets its region selectors and matchers query a vterm.js screen the same way they query xterm.js, Ghostty, or Alacritty. See the [backend guide](https://termless.dev/guide/backends).
+
+**A session recorder wraps a snapshot as a checkpoint.** `screen.snapshot()` returns a plain serializable value, so a recorder can persist one periodically and replay only the bytes appended since — reconstructing any earlier instant without keeping every byte of the session. `screen.restore(snapshot)` is the way back in, `encodeScreenSnapshotBinary` / `decodeScreenSnapshotBinary` the compact on-disk form, and `serializeSnapshot` (state → minimal ANSI) the same seam for consumers that want text rather than cells.
+
+That makes the snapshot shape a **durable format, not just an in-memory type**. Snapshots are written to disk by callers this repo never sees. A field whose meaning changes silently invalidates every checkpoint already on disk, so a snapshot change is a compatibility decision — introduce a new field, never redefine an existing one.
+
+**Scrubbing to a past instant asks this library for nothing new.** "What did that screen look like at 14:02" decomposes into exactly two calls a caller already has: `restore()` the nearest checkpoint, then `process()` the bytes recorded between then and 14:02. There is no history mode, no seek, and no clock here — the timeline belongs to the caller. That is deliberate: a live read and a historical read are the same call sequence, so they cannot drift apart, and a bug in one is a bug in both.
+
+**One engine, many oracles.** vt100.js and vt220.js are conformance tiers of one lineage, not alternatives to run in production — they exist so a strict-VT100 or VT220 claim can be tested against an emulator that genuinely refuses everything newer. Downstream, only vterm.js is meant to be the screen model an application actually runs. Other emulators stay reachable through Termless as **differential oracles** — a second opinion when a case disagrees — never as a second engine to maintain. Two screen models mean two sets of bugs and two places to fix each one.
+
+**How the engine is graded.** The differential conformance corpus lives in Termless: cases mined from other emulators' own MIT-licensed test suites — [Ghostty](https://github.com/ghostty-org/ghostty)'s inline Zig unit tests, [neovim's libvterm](https://github.com/neovim/libvterm) reference suite — run against every registered backend, and the resulting terminal states are diffed. A divergence is either a bug here or an entry in a `known-gaps.json` ledger that ratchets both ways: an un-ledgered failure fails the build, and a ledgered gap that starts passing fails too, until someone removes the entry. Grading goes through the ordinary `TerminalBackend` seam, so there is no test-only door into this emulator — a passing grade is evidence about the code that ships. Details: [conformance corpus](https://termless.dev/advanced/conformance-corpus).
+
 ## Ecosystem
 
 - [Termless](https://termless.dev) — headless terminal testing (uses vt100.js as default backend)
