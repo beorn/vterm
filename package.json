@@ -13,7 +13,7 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -p packages/vt100 --noEmit && tsc -p packages/vt220 --noEmit && tsc -p packages/vterm --noEmit",
     "fmt": "oxfmt --write .",
     "fmt:check": "oxfmt --check ."
   },

@@ -52,8 +52,16 @@ bun vitest run                           # Run all tests
 bun vitest run packages/vt100/tests/     # vt100.js tests only
 bun vitest run packages/vt220/tests/     # vt220.js tests only
 bun vitest run packages/vterm/tests/     # vterm.js tests only
-bun run typecheck                        # TypeScript check (tsc --noEmit)
+bun run typecheck                        # TypeScript check (per package)
 ```
+
+**`tsc --noEmit` at the repo root checks NOTHING.** The root `tsconfig.json` is
+`"include": []` with project references, so a bare run compiles zero files and
+passes unconditionally — it once hid a missing snapshot-type member and a
+syntax error, both shipped green. Always go through `bun run typecheck` (which
+runs each package with `-p`), or `tsc -p packages/<name> --noEmit` for one.
+`tests/typecheck-gate.test.ts` guards this by asserting the configured check
+actually compiles each package's own sources.
 
 ## Code Style
 
