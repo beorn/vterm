@@ -1614,6 +1614,23 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     scrollbackSoftWrapped.length = 0
   }
 
+  /**
+   * Bank one row into scrollback, trimming to the limit. Returns how many rows
+   * were trimmed off the front so a caller tracking absolute rows can rebase.
+   *
+   * Every scrollback mutation goes through a helper that moves BOTH arrays —
+   * see `clearScrollback` for what one unpaired mutation cost.
+   */
+  function bankScrollbackRow(row: PackedRow, wrapped: boolean): number {
+    scrollback.push(row)
+    scrollbackSoftWrapped.push(wrapped)
+    if (scrollback.length <= scrollbackLimit * 2) return 0
+    const over = scrollback.length - scrollbackLimit
+    scrollback.splice(0, over)
+    scrollbackSoftWrapped.splice(0, over)
+    return over
+  }
+
   // Last printed character for REP
   let lastChar = ""
 
@@ -4611,9 +4628,19 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   /**
    * Trim trailing empty rows from reflowed result, so they don't push content off the top
    * when we take the last newRows rows.
+   *
+   * Never trims the row the CURSOR is on. A shell that has just emitted its
+   * final newline sits on a blank last row, and dropping it makes the content
+   * measure one row shorter than it is — so a shrink banks one row too few and
+   * every surviving line lands one row low, taking the cursor with it.
    */
-  function trimTrailingEmptyRows(result: { rows: PackedRow[]; wrapped: boolean[] }): void {
-    while (result.rows.length > 1) {
+  function trimTrailingEmptyRows(result: {
+    rows: PackedRow[]
+    wrapped: boolean[]
+    tracked?: { row: number; col: number } | null
+  }): void {
+    const floor = result.tracked == null ? 1 : Math.max(1, result.tracked.row + 1)
+    while (result.rows.length > floor) {
       const lastRow = result.rows[result.rows.length - 1]!
       const isEmpty = packedRowIsBlank(lastRow)
       if (isEmpty && !result.wrapped[result.rows.length - 2]) {
@@ -4647,8 +4674,48 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
     const cursorTrack = { line: cursorLineIdx, offset: (cursorRowPre - cursorLineStart) * cols + curX }
 
+    // Growing taller re-fills from history: rows that scrolled off the top come
+    // back instead of leaving a blank band under the content. Measure the
+    // content's height at the NEW width first — a probe with no cursor tracking
+    // — then restore only what fits.
+    //
+    // The restored rows are prepended BEFORE reflow, not spliced into the
+    // finished grid, so a resize that also changes width rewraps history
+    // together with the screen rather than pasting in rows of the old width.
+    let restoredRows: PackedRow[] = []
+    let restoredWrapped: boolean[] = []
+    // Gated on the terminal actually getting TALLER. Room freed by widening
+    // (which re-joins wrapped lines and shortens the content) is not an
+    // invitation to unspool history: doing that pushed a reflow case's content
+    // down a row and broke it.
+    if (!useAltScreen && newRows > rows && scrollback.length > 0) {
+      const probe = rewrapLines(getLogicalLines(mainGrid, mainSoftWrapped, rows), newCols, undefined)
+      trimTrailingEmptyRows(probe)
+      const take = Math.min(Math.max(0, newRows - probe.rows.length), scrollback.length)
+      if (take > 0) {
+        restoredRows = scrollback.splice(scrollback.length - take, take)
+        restoredWrapped = scrollbackSoftWrapped.splice(scrollbackSoftWrapped.length - take, take)
+      }
+    }
+    if (restoredRows.length > 0) {
+      // Every screen logical line moves down by the number of COMPLETE lines the
+      // restored block holds. A trailing soft-wrapped row is the exception: it
+      // MERGES into the screen's first line, so that line does not move — the
+      // cursor's offset within it does.
+      let completed = 0
+      for (const wrapped of restoredWrapped) if (!wrapped) completed++
+      if (cursorTrack.line === 0 && restoredWrapped[restoredWrapped.length - 1] === true) {
+        for (let i = restoredWrapped.length - 1; i >= 0 && restoredWrapped[i]; i--) {
+          cursorTrack.offset += restoredRows[i]!.length
+        }
+      }
+      cursorTrack.line += completed
+    }
+
     // Reflow main grid
-    const mainLogical = getLogicalLines(mainGrid, mainSoftWrapped, rows)
+    const mainSrc = restoredRows.length > 0 ? [...restoredRows, ...mainGrid] : mainGrid
+    const mainSrcWrapped = restoredRows.length > 0 ? [...restoredWrapped, ...mainSoftWrapped] : mainSoftWrapped
+    const mainLogical = getLogicalLines(mainSrc, mainSrcWrapped, restoredRows.length + rows)
     const mainResult = rewrapLines(mainLogical, newCols, useAltScreen ? undefined : cursorTrack)
     trimTrailingEmptyRows(mainResult)
 
@@ -4661,6 +4728,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     const newMain = makeGrid(newCols, newRows)
     const newMainWrapped: boolean[] = new Array(newRows).fill(false)
     const mainStartRow = Math.max(0, mainResult.rows.length - newRows)
+    // Rows pushed off the TOP by a shrink are history, not waste. They were
+    // being dropped on the floor: shrink a pane and the lines that scrolled
+    // past the top were gone, where the identical rows banked by a linefeed
+    // would have been kept. Scrollback is the main screen's, so this runs
+    // whichever buffer is displayed.
+    for (let r = 0; r < mainStartRow; r++) {
+      bankScrollbackRow(mainResult.rows[r]!, mainResult.wrapped[r] ?? false)
+    }
     for (let r = 0; r < newRows && mainStartRow + r < mainResult.rows.length; r++) {
       newMain[r] = mainResult.rows[mainStartRow + r]!
       newMainWrapped[r] = mainResult.wrapped[mainStartRow + r]!

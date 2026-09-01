@@ -2458,3 +2458,59 @@ describe("ECH background color erase", () => {
     expect(screen.getCell(0, 4).bg).toBeNull()
   })
 })
+
+describe("resize exchanges rows with scrollback", () => {
+  const rowText = (cells: { char: string }[]): string => cells.map((c) => c.char || " ").join("").trimEnd()
+
+  test("shrinking banks the rows it pushes off the top instead of dropping them", () => {
+    // These rows are history exactly as much as rows a linefeed scrolled away.
+    // Discarding them meant making a pane shorter silently destroyed content.
+    const screen = createVtermScreen({ cols: 80, rows: 25, scrollbackLimit: 1000 })
+    screen.process(enc.encode(Array.from({ length: 25 }, (_, i) => `line ${String(i)}`).join("\r\n")))
+    expect(screen.getScrollbackLength()).toBe(0)
+
+    screen.resize(80, 10)
+
+    expect(screen.getScrollbackLength()).toBe(15)
+    const snap = screen.snapshot()
+    expect(snap.scrollbackSoftWrapped).toHaveLength(snap.scrollback.length)
+    // Oldest first, so history reads in the order it happened.
+    expect(rowText(snap.scrollback[0]!)).toBe("line 0")
+    expect(rowText(snap.scrollback[14]!)).toBe("line 14")
+    // ...and the screen keeps the newest rows.
+    // getRow is viewport-relative: row 0 is the top visible line.
+    expect(rowText(screen.getRow(0))).toBe("line 15")
+  })
+
+  test("growing taller pops history back instead of leaving a blank band", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 10, scrollbackLimit: 1000 })
+    screen.process(enc.encode(Array.from({ length: 20 }, (_, i) => `line ${String(i)}`).join("\r\n")))
+    const banked = screen.getScrollbackLength()
+    expect(banked).toBeGreaterThan(0)
+    const cursorBefore = screen.getCursor().row
+
+    screen.resize(80, 15)
+
+    // Five rows of history came back, and the content moved DOWN to make room
+    // rather than the new rows appearing empty underneath it.
+    expect(screen.getScrollbackLength()).toBe(banked - 5)
+    expect(screen.getCursor().row).toBe(cursorBefore + 5)
+    expect(rowText(screen.getRow(0))).toBe("line 5")
+
+    const snap = screen.snapshot()
+    expect(snap.scrollbackSoftWrapped).toHaveLength(snap.scrollback.length)
+  })
+
+  test("widening alone does not unspool history", () => {
+    // Re-joining wrapped lines frees rows; that is not room to restore into.
+    // Treating it as room pushed a reflowed screen down by a row.
+    const screen = createVtermScreen({ cols: 10, rows: 5, scrollbackLimit: 1000 })
+    screen.process(enc.encode(Array.from({ length: 12 }, (_, i) => `${"w".repeat(9)}${String(i % 10)}`).join("\r\n")))
+    const banked = screen.getScrollbackLength()
+    expect(banked).toBeGreaterThan(0)
+
+    screen.resize(40, 5)
+
+    expect(screen.getScrollbackLength()).toBe(banked)
+  })
+})
