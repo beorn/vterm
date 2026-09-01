@@ -467,4 +467,72 @@ describe("snapshot-codec — size", () => {
       }
     })
   })
+
+  // ── DEC line attributes (DECDWL/DECDHL) ──────────────────────────────
+
+  describe("line attributes survive the codec", () => {
+    /**
+     * A double-width line addresses and wraps at half the columns. If the
+     * attribute does not persist, a restored screen silently reverts to full
+     * width — measured before the fix as a 20-column screen wrapping at 20
+     * where the live screen wrapped at 10.
+     *
+     * Sparse and header-resident: only non-normal rows are stored, and they
+     * ride the JSON header because the binary grid sections have no skippable
+     * framing for an older reader to hop over.
+     */
+    test("a double-width line still wraps at half width after a round trip", () => {
+      const screen = mkScreen(20, 4)
+      feed(screen, `${ESC}#6`)
+      feed(screen, "A".repeat(12))
+      const live = screen.getCursor()
+      expect(live).toMatchObject({ row: 1, col: 2 })
+
+      const snapshot = screen.snapshot()
+      expect(snapshot.lineAttrs?.main).toEqual([[0, 1]])
+      roundTrip(snapshot)
+
+      const restored = mkScreen(20, 4)
+      restored.restore(decodeScreenSnapshotBinary(encodeScreenSnapshotBinary(snapshot)))
+      feed(restored, `${ESC}[H`)
+      feed(restored, "B".repeat(12))
+      expect(restored.getCursor()).toMatchObject({ row: 1, col: 2 })
+    })
+
+    test("only non-normal rows are stored, so an ordinary screen costs nothing", () => {
+      const screen = mkScreen(20, 4)
+      feed(screen, "plain")
+      const snapshot = screen.snapshot()
+      expect(snapshot.lineAttrs).toEqual({ main: [], alt: [], scrollback: [] })
+      roundTrip(snapshot)
+    })
+
+    test("a snapshot with no lineAttrs restores as an all-normal screen", () => {
+      // The compatibility direction: snapshots written before the field exists
+      // must still load, rendering single-width rather than failing.
+      const screen = mkScreen(20, 4)
+      feed(screen, `${ESC}#6`)
+      const snapshot = screen.snapshot()
+      delete (snapshot as { lineAttrs?: unknown }).lineAttrs
+
+      const restored = mkScreen(20, 4)
+      restored.restore(snapshot)
+      feed(restored, "A".repeat(12))
+      // Full width: wrapped at 20, not 10.
+      expect(restored.getCursor()).toMatchObject({ row: 0, col: 12 })
+    })
+
+    test("attributes follow their line through a reflowing resize", () => {
+      const screen = mkScreen(20, 6)
+      feed(screen, `${ESC}#6`)
+      feed(screen, "A".repeat(8))
+      expect(screen.snapshot().lineAttrs?.main).toEqual([[0, 1]])
+
+      screen.resize(40, 6)
+      // The line kept its attribute across the rewrap, so it still wraps at 20.
+      const after = screen.snapshot()
+      expect(after.lineAttrs?.main).toEqual([[0, 1]])
+      roundTrip(after)
+    })
+  })
 })

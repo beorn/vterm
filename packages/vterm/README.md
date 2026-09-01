@@ -443,6 +443,59 @@ vterm.js is for the opposite case: nothing ever gets painted. It's headless-firs
 
 Because vterm.js makes no display claims, it's held to a stricter standard instead: engine conformance, graded publicly and continuously in [Termless](https://termless.dev)'s differential conformance corpus against xterm.js, Ghostty, and neovim's libvterm. Current per-engine results and every known gap live in the ratchet ledger (`known-gaps.json`) — it's two-way: an unlisted failure fails the build, and a listed gap that starts passing fails too. Full results are public at [termless.dev/advanced/conformance-corpus](https://termless.dev/advanced/conformance-corpus).
 
+## Deliberate divergences
+
+A handful of behaviours where vterm.js knowingly differs from neovim's
+libvterm, the reference implementation the conformance corpus is mined from.
+Each was ruled deliberately rather than left as a gap, so **100% conformance
+for vterm.js means 126/128 plus these documented divergences** — not 128.
+
+Each entry names the _override word_ that would reverse the ruling. If you need
+the other behaviour, open an issue with that word and the reason; it is the
+argument, not the preference, that would move it.
+
+### Cursor follows reflow when a resize shrinks below it
+
+Shrinking the terminal past the cursor's column carries the cursor with its
+line through the rewrap. libvterm, xterm.js and vt100.js instead clamp it to
+the last column of the row it was on.
+
+Following the line is what a reflowing terminal does — the cursor stays with
+the text a user was typing, rather than jumping to wherever that text used to
+end. Clamping is the pre-reflow behaviour the other three inherit from a
+shared ancestry, and three engines agreeing about their own history is not an
+argument about which is correct. Both ends of our own record/replay path read
+vterm.js, so there is no internal disagreement to resolve.
+
+**Override word: `clamp`.**
+
+### RIS clears the scrollback
+
+A full reset (`ESC c`) discards scrollback along with the screen. libvterm
+preserves it, so history banked before a reset can still be scrolled back to —
+and can even be popped back onto the screen by a later resize.
+
+Every other engine in the corpus — xterm.js, Ghostty and vt100.js — clears on
+RIS, as does xterm itself. A reset that leaves history behind surprises the
+common case, where `reset` is reached for precisely to get a clean terminal.
+
+**Override word: `match-ris`.**
+
+### Related: the deferred-wrap cursor
+
+Not an excluded case, but the same family and worth knowing if you read the
+cursor. When a glyph fills the last column with autowrap on, the terminal owes
+a wrap it has not performed. vterm.js represents that as the cursor sitting at
+`col == cols` — one past the last column — as xterm.js and vt100.js do.
+libvterm and Ghostty instead keep the cursor _on_ the last column and carry a
+separate pending-wrap flag. The corpus normalizes this rather than excluding
+it, so those cases pass; consumers reading `cursor.col` should simply expect
+the `col == cols` form.
+
+These entries mirror the corpus-side table in the suite's own README and the
+machine-readable reasons in `known-gaps.json`. A new ruling lands in all three
+at once.
+
 ## See also
 
 - [vt100.js](../vt100/) — VT100-era emulator (smaller, focused)

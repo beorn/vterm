@@ -2297,6 +2297,9 @@ describe("snapshot / restore", () => {
       "cols",
       "cursor",
       "cwd",
+      // Sparse DEC line attributes (DECDWL/DECDHL). Optional on the type and
+      // absent from older snapshots, but always emitted by snapshot().
+      "lineAttrs",
       "main",
       "margins",
       "modes",
@@ -2460,7 +2463,11 @@ describe("ECH background color erase", () => {
 })
 
 describe("resize exchanges rows with scrollback", () => {
-  const rowText = (cells: { char: string }[]): string => cells.map((c) => c.char || " ").join("").trimEnd()
+  const rowText = (cells: { char: string }[]): string =>
+    cells
+      .map((c) => c.char || " ")
+      .join("")
+      .trimEnd()
 
   test("shrinking banks the rows it pushes off the top instead of dropping them", () => {
     // These rows are history exactly as much as rows a linefeed scrolled away.

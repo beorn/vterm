@@ -189,6 +189,26 @@ export interface Snapshot {
    * `restore()` treats missing as all-false (hard-wrapped).
    */
   scrollbackSoftWrapped: boolean[]
+  /**
+   * DEC line attributes (DECDWL/DECDHL), SPARSE: only rows that are not normal
+   * appear, as `[rowIndex, attr]` pairs — 1 double-width, 2 double-height top,
+   * 3 double-height bottom.
+   *
+   * Sparse and header-resident on purpose. Double-width lines are a banner
+   * feature that almost no session emits, so a dense array per grid would be
+   * thousands of zeros; and the binary grid sections have no skippable framing,
+   * so a new array THERE would desynchronise an older reader rather than be
+   * ignored by it.
+   *
+   * Absent in snapshots taken before this field existed — `restore()` treats
+   * missing as all-normal. **Readers older than this field render DWL/DHL lines
+   * single-width**: a visual downgrade, never corruption.
+   */
+  lineAttrs?: {
+    main: [number, number][]
+    alt: [number, number][]
+    scrollback: [number, number][]
+  }
   cursor: {
     x: number
     y: number
@@ -1590,8 +1610,16 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let mainSoftWrapped: boolean[] = new Array(rows).fill(false)
   let altSoftWrapped: boolean[] = new Array(rows).fill(false)
   let softWrapped = mainSoftWrapped
+  // Per-row DEC line attributes: 0 normal (DECSWL), 1 double-width (DECDWL),
+  // 2 double-height top (DECDHL), 3 double-height bottom. A parallel array per
+  // grid exactly like softWrapped, because PackedRow has no row-level slot.
+  // Every one of 1/2/3 is double-WIDTH: DHL is DWL that also doubles height.
+  let mainLineAttrs: number[] = new Array<number>(rows).fill(0)
+  let altLineAttrs: number[] = new Array<number>(rows).fill(0)
+  let lineAttrs = mainLineAttrs
   // Parallel to `scrollback`: the departing row's soft-wrap bit, captured at scroll-out
   let scrollbackSoftWrapped: boolean[] = []
+  let scrollbackLineAttrs: number[] = []
 
   /**
    * Drop every banked scrollback row AND its soft-wrap flag.
@@ -1609,9 +1637,30 @@ export function createScreen(options: ScreenOptions = {}): Screen {
    * clear goes through here so the pairing is structural rather than
    * remembered at each call site.
    */
+  /** Dense per-row attributes -> sparse `[row, attr]` pairs, skipping normal rows. */
+  function toSparseAttrs(dense: readonly number[]): [number, number][] {
+    const out: [number, number][] = []
+    for (let r = 0; r < dense.length; r++) {
+      const a = dense[r] ?? 0
+      if (a !== 0) out.push([r, a])
+    }
+    return out
+  }
+
+  /** Sparse pairs -> a dense array of `length`; out-of-range rows are dropped. */
+  function fromSparseAttrs(sparse: readonly (readonly [number, number])[] | undefined, length: number): number[] {
+    const dense: number[] = new Array<number>(length).fill(0)
+    for (const pair of sparse ?? []) {
+      const [r, a] = pair
+      if (Number.isInteger(r) && r >= 0 && r < length) dense[r] = a
+    }
+    return dense
+  }
+
   function clearScrollback(): void {
     scrollback.length = 0
     scrollbackSoftWrapped.length = 0
+    scrollbackLineAttrs.length = 0
   }
 
   /**
@@ -1621,13 +1670,15 @@ export function createScreen(options: ScreenOptions = {}): Screen {
    * Every scrollback mutation goes through a helper that moves BOTH arrays —
    * see `clearScrollback` for what one unpaired mutation cost.
    */
-  function bankScrollbackRow(row: PackedRow, wrapped: boolean): number {
+  function bankScrollbackRow(row: PackedRow, wrapped: boolean, lineAttr: number): number {
     scrollback.push(row)
     scrollbackSoftWrapped.push(wrapped)
+    scrollbackLineAttrs.push(lineAttr)
     if (scrollback.length <= scrollbackLimit * 2) return 0
     const over = scrollback.length - scrollbackLimit
     scrollback.splice(0, over)
     scrollbackSoftWrapped.splice(0, over)
+    scrollbackLineAttrs.splice(0, over)
     return over
   }
 
@@ -1830,11 +1881,21 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
   }
 
+  /**
+   * Usable columns on a row. A DEC double-width line (DECDWL/DECDHL) renders
+   * each cell twice as wide, so the row addresses and wraps at half the
+   * terminal's columns — an 80-column screen wraps a double-width line at 40.
+   */
+  function rowCols(row: number): number {
+    return (lineAttrs[row] ?? 0) === 0 ? cols : cols >> 1
+  }
+
   function clampCursor(): void {
     if (curX < 0) curX = 0
-    if (curX >= cols) curX = cols - 1
     if (curY < 0) curY = 0
     if (curY >= rows) curY = rows - 1
+    const usable = rowCols(curY)
+    if (curX >= usable) curX = usable - 1
     // DECOM (origin mode) confines the cursor to the scrolling region, not
     // just to the screen: with a region of 5..15, CUU from the top row stops
     // at the region's top rather than at row 0.
@@ -1893,13 +1954,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       // Move top row to scrollback (only if main screen & top of screen)
       const enteredScrollback = grid === mainGrid && top === 0
       if (enteredScrollback) {
-        scrollback.push(grid[0]!)
-        scrollbackSoftWrapped.push(softWrapped[0] ?? false)
-        markAbsoluteRowDirty(scrollback.length - 1)
-        if (scrollback.length > scrollbackLimit * 2) {
-          const over = scrollback.length - scrollbackLimit
-          scrollback.splice(0, over)
-          scrollbackSoftWrapped.splice(0, over)
+        const banked = grid[0]
+        const over = banked === undefined ? 0 : bankScrollbackRow(banked, softWrapped[0] ?? false, lineAttrs[0] ?? 0)
+        markAbsoluteRowDirty(scrollback.length - 1 + over)
+        if (over > 0) {
           // Absolute indices shift down by `over`; rebase accumulated damage and record the trim.
           if (!dirtyAll && dirtyRows.size > 0) {
             const shifted = new Set<number>()
@@ -2099,7 +2157,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     if (cols <= 0 || rows <= 0) return
 
     const charWidth = wide ? 2 : 1
-    const wrapBoundary = leftRightMarginMode ? rightMargin + 1 : cols
+    const wrapBoundary = leftRightMarginMode ? rightMargin + 1 : rowCols(curY)
     const wrapReturn = leftRightMarginMode ? leftMargin : 0
 
     // Handle autowrap at end of line (or right margin)
@@ -2767,11 +2825,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             useAltScreen = true
             grid = altGrid
             softWrapped = altSoftWrapped
+            lineAttrs = altLineAttrs
             markAllDirty() // whole visible buffer swapped
           } else if (!set && useAltScreen) {
             useAltScreen = false
             grid = mainGrid
             softWrapped = mainSoftWrapped
+            lineAttrs = mainLineAttrs
             markAllDirty()
           }
           break
@@ -2800,8 +2860,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             useAltScreen = true
             altGrid = makeGrid(cols, rows)
             altSoftWrapped = new Array(rows).fill(false)
+            altLineAttrs = new Array<number>(rows).fill(0)
             grid = altGrid
             softWrapped = altSoftWrapped
+            lineAttrs = altLineAttrs
             curX = 0
             curY = 0
             markAllDirty() // whole visible buffer swapped
@@ -2809,6 +2871,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             useAltScreen = false
             grid = mainGrid
             softWrapped = mainSoftWrapped
+            lineAttrs = mainLineAttrs
             curX = savedCurX
             curY = savedCurY
             clampCursor()
@@ -4031,6 +4094,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     mainSoftWrapped = new Array(rows).fill(false)
     altSoftWrapped = new Array(rows).fill(false)
     softWrapped = mainSoftWrapped
+    mainLineAttrs = new Array<number>(rows).fill(0)
+    altLineAttrs = new Array<number>(rows).fill(0)
+    lineAttrs = mainLineAttrs
     // Fresh world: scrollback wiped, so the damage epoch restarts and the trim origin returns to 0.
     markAllDirty()
     dirtyScrolled = 0
@@ -4368,7 +4434,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             curX = 0
             curY = 0
           }
-          // Other ESC # sequences (3/4/5/6 for double-width/height) are ignored.
+          // DECDWL / DECDHL / DECSWL — a DEC line attribute on the CURRENT row.
+          // A double-width row addresses and wraps at half the columns, which is
+          // the part that actually shows up in conformance: ignoring these made
+          // an 80-column screen wrap at 80 on a line that should wrap at 40.
+          else if (ch === "3") lineAttrs[curY] = 2
+          else if (ch === "4") lineAttrs[curY] = 3
+          else if (ch === "5") lineAttrs[curY] = 0
+          else if (ch === "6") lineAttrs[curY] = 1
           parserState = "ground"
           emitEsc(ch, escIntermediate)
           break
@@ -4552,13 +4625,41 @@ export function createScreen(options: ScreenOptions = {}): Screen {
    * trailing blanks or one past the last cell) lands after the last emitted
    * cell, advanced by the leftover distance, clamped to the row.
    */
+  /**
+   * One line attribute per LOGICAL line, taken from the line's FIRST physical
+   * row — the grouping `getLogicalLines` uses, so the two arrays line up.
+   * A rewrap then re-applies the attribute to every row the line becomes.
+   */
+  function logicalLineAttrs(
+    srcGrid: PackedRow[],
+    srcSoftWrapped: boolean[],
+    srcLineAttrs: number[],
+    srcRows: number,
+  ): number[] {
+    const out: number[] = []
+    let starting = true
+    for (let r = 0; r < srcRows; r++) {
+      if (!srcGrid[r]) continue
+      if (starting) out.push(srcLineAttrs[r] ?? 0)
+      starting = !srcSoftWrapped[r]
+    }
+    return out
+  }
+
   function rewrapLines(
     logicalLines: ScreenCell[][],
     newCols: number,
     track?: { line: number; offset: number },
-  ): { rows: PackedRow[]; wrapped: boolean[]; tracked: { row: number; col: number } | null } {
+  ): {
+    rows: PackedRow[]
+    wrapped: boolean[]
+    /** Source logical-line index per output row — carries per-line attributes across a rewrap. */
+    lineIndex: number[]
+    tracked: { row: number; col: number } | null
+  } {
     const outRows: PackedRow[] = []
     const outWrapped: boolean[] = []
+    const outLine: number[] = []
     let tracked: { row: number; col: number } | null = null
 
     for (let li = 0; li < logicalLines.length; li++) {
@@ -4578,6 +4679,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         // Empty logical line — produce one empty row
         outRows.push(makeRow(newCols))
         outWrapped.push(false)
+        outLine.push(li)
         if (track?.line === li) {
           tracked = { row: outRows.length - 1, col: Math.min(track.offset, newCols - 1) }
         }
@@ -4607,6 +4709,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         const moreContent = pos < lineLen
         outRows.push(row)
         outWrapped.push(moreContent) // soft-wrapped if there's more content to come
+        outLine.push(li)
         if (!moreContent && track?.line === li && tracked === null) {
           const extra = track.offset - lineLen
           tracked = { row: outRows.length - 1, col: Math.min(newCols - 1, col + extra) }
@@ -4614,7 +4717,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       }
     }
 
-    return { rows: outRows, wrapped: outWrapped, tracked }
+    return { rows: outRows, wrapped: outWrapped, lineIndex: outLine, tracked }
   }
 
   /** True when a packed row has no printable content (all columns blank). */
@@ -4637,6 +4740,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   function trimTrailingEmptyRows(result: {
     rows: PackedRow[]
     wrapped: boolean[]
+    lineIndex?: number[]
     tracked?: { row: number; col: number } | null
   }): void {
     const floor = result.tracked == null ? 1 : Math.max(1, result.tracked.row + 1)
@@ -4647,6 +4751,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         // The row before wasn't soft-wrapped and this row is empty — trim it
         result.rows.pop()
         result.wrapped.pop()
+        result.lineIndex?.pop()
       } else {
         break
       }
@@ -4684,6 +4789,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     // together with the screen rather than pasting in rows of the old width.
     let restoredRows: PackedRow[] = []
     let restoredWrapped: boolean[] = []
+    let restoredAttrs: number[] = []
     // Gated on the terminal actually getting TALLER. Room freed by widening
     // (which re-joins wrapped lines and shortens the content) is not an
     // invitation to unspool history: doing that pushed a reflow case's content
@@ -4695,6 +4801,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       if (take > 0) {
         restoredRows = scrollback.splice(scrollback.length - take, take)
         restoredWrapped = scrollbackSoftWrapped.splice(scrollbackSoftWrapped.length - take, take)
+        restoredAttrs = scrollbackLineAttrs.splice(scrollbackLineAttrs.length - take, take)
       }
     }
     if (restoredRows.length > 0) {
@@ -4715,11 +4822,15 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     // Reflow main grid
     const mainSrc = restoredRows.length > 0 ? [...restoredRows, ...mainGrid] : mainGrid
     const mainSrcWrapped = restoredRows.length > 0 ? [...restoredWrapped, ...mainSoftWrapped] : mainSoftWrapped
-    const mainLogical = getLogicalLines(mainSrc, mainSrcWrapped, restoredRows.length + rows)
+    const mainSrcAttrs = restoredRows.length > 0 ? [...restoredAttrs, ...mainLineAttrs] : mainLineAttrs
+    const mainSrcRows = restoredRows.length + rows
+    const mainLogicalAttrs = logicalLineAttrs(mainSrc, mainSrcWrapped, mainSrcAttrs, mainSrcRows)
+    const mainLogical = getLogicalLines(mainSrc, mainSrcWrapped, mainSrcRows)
     const mainResult = rewrapLines(mainLogical, newCols, useAltScreen ? undefined : cursorTrack)
     trimTrailingEmptyRows(mainResult)
 
     // Reflow alt grid (usually not reflowed, but do it for consistency)
+    const altLogicalAttrs = logicalLineAttrs(altGrid, altSoftWrapped, altLineAttrs, rows)
     const altLogical = getLogicalLines(altGrid, altSoftWrapped, rows)
     const altResult = rewrapLines(altLogical, newCols, useAltScreen ? cursorTrack : undefined)
     trimTrailingEmptyRows(altResult)
@@ -4727,6 +4838,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     // Build new grids: if reflowed content fits, place at top; if it overflows, take the last newRows
     const newMain = makeGrid(newCols, newRows)
     const newMainWrapped: boolean[] = new Array(newRows).fill(false)
+    const newMainAttrs: number[] = new Array<number>(newRows).fill(0)
     const mainStartRow = Math.max(0, mainResult.rows.length - newRows)
     // Rows pushed off the TOP by a shrink are history, not waste. They were
     // being dropped on the floor: shrink a pane and the lines that scrolled
@@ -4734,20 +4846,26 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     // would have been kept. Scrollback is the main screen's, so this runs
     // whichever buffer is displayed.
     for (let r = 0; r < mainStartRow; r++) {
-      bankScrollbackRow(mainResult.rows[r]!, mainResult.wrapped[r] ?? false)
+      const overflow = mainResult.rows[r]
+      if (overflow !== undefined) {
+        bankScrollbackRow(overflow, mainResult.wrapped[r] ?? false, mainLogicalAttrs[mainResult.lineIndex[r] ?? 0] ?? 0)
+      }
     }
     for (let r = 0; r < newRows && mainStartRow + r < mainResult.rows.length; r++) {
       newMain[r] = mainResult.rows[mainStartRow + r]!
       newMainWrapped[r] = mainResult.wrapped[mainStartRow + r]!
+      newMainAttrs[r] = mainLogicalAttrs[mainResult.lineIndex[mainStartRow + r] ?? 0] ?? 0
     }
 
     // Build new alt grid
     const newAlt = makeGrid(newCols, newRows)
     const newAltWrapped: boolean[] = new Array(newRows).fill(false)
+    const newAltAttrs: number[] = new Array<number>(newRows).fill(0)
     const altStartRow = Math.max(0, altResult.rows.length - newRows)
     for (let r = 0; r < newRows && altStartRow + r < altResult.rows.length; r++) {
       newAlt[r] = altResult.rows[altStartRow + r]!
       newAltWrapped[r] = altResult.wrapped[altStartRow + r]!
+      newAltAttrs[r] = altLogicalAttrs[altResult.lineIndex[altStartRow + r] ?? 0] ?? 0
     }
 
     // Land the cursor where its logical line went (tracked pre-reflow above).
@@ -4764,8 +4882,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     altGrid = newAlt
     mainSoftWrapped = newMainWrapped
     altSoftWrapped = newAltWrapped
+    mainLineAttrs = newMainAttrs
+    altLineAttrs = newAltAttrs
     grid = useAltScreen ? altGrid : mainGrid
     softWrapped = useAltScreen ? altSoftWrapped : mainSoftWrapped
+    lineAttrs = useAltScreen ? altLineAttrs : mainLineAttrs
     const oldCols = cols
     cols = newCols
     rows = newRows
@@ -4808,6 +4929,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       },
       scrollback: cloneGridSnapshot(scrollback),
       scrollbackSoftWrapped: [...scrollbackSoftWrapped],
+      lineAttrs: {
+        main: toSparseAttrs(mainLineAttrs),
+        alt: toSparseAttrs(altLineAttrs),
+        scrollback: toSparseAttrs(scrollbackLineAttrs),
+      },
       cursor: {
         x: curX,
         y: curY,
@@ -4902,9 +5028,15 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       : new Array<boolean>(scrollback.length).fill(false)
     mainSoftWrapped = [...snapshotValue.main.softWrapped]
     altSoftWrapped = [...snapshotValue.alt.softWrapped]
+    // Missing => all-normal, so a snapshot written before line attributes
+    // existed restores as a plain screen rather than failing.
+    mainLineAttrs = fromSparseAttrs(snapshotValue.lineAttrs?.main, mainSoftWrapped.length)
+    altLineAttrs = fromSparseAttrs(snapshotValue.lineAttrs?.alt, altSoftWrapped.length)
+    scrollbackLineAttrs = fromSparseAttrs(snapshotValue.lineAttrs?.scrollback, scrollback.length)
     useAltScreen = snapshotValue.activeBuffer === "alt"
     grid = useAltScreen ? altGrid : mainGrid
     softWrapped = useAltScreen ? altSoftWrapped : mainSoftWrapped
+    lineAttrs = useAltScreen ? altLineAttrs : mainLineAttrs
 
     curX = snapshotValue.cursor.x
     curY = snapshotValue.cursor.y

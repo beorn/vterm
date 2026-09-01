@@ -97,6 +97,13 @@ interface StyleTuple {
 
 /** The small scalar state carried verbatim in the JSON header. */
 interface SnapshotHeader {
+  /**
+   * Sparse DEC line attributes. Header-resident because the grid sections have
+   * no skippable framing: a reader older than this field ignores an unknown
+   * JSON key and renders DWL/DHL lines single-width, where a new binary array
+   * would have desynchronised its positional parse instead.
+   */
+  lineAttrs?: Snapshot["lineAttrs"]
   cols: number
   rows: number
   scrollbackLimit: number
@@ -675,6 +682,7 @@ export function encodeScreenSnapshotBinary(snapshot: Snapshot): Uint8Array {
     savedState: snapshot.savedState,
     attrs: snapshot.attrs,
     modes: snapshot.modes,
+    lineAttrs: snapshot.lineAttrs,
     margins: snapshot.margins,
     colors: snapshot.colors,
     tabStops: snapshot.tabStops,
@@ -749,6 +757,7 @@ export function decodeScreenSnapshotBinary(bytes: Uint8Array): Snapshot {
     savedState: header.savedState,
     attrs: header.attrs,
     modes: header.modes,
+    lineAttrs: header.lineAttrs,
     margins: header.margins,
     colors: header.colors,
     tabStops: header.tabStops,
