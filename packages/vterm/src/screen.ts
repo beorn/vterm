@@ -1794,6 +1794,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     if (curX >= cols) curX = cols - 1
     if (curY < 0) curY = 0
     if (curY >= rows) curY = rows - 1
+    // DECOM (origin mode) confines the cursor to the scrolling region, not
+    // just to the screen: with a region of 5..15, CUU from the top row stops
+    // at the region's top rather than at row 0.
+    if (originMode) {
+      if (curY < scrollTop) curY = scrollTop
+      if (curY > scrollBottom) curY = scrollBottom
+    }
   }
 
   // ── Scrolling ──
@@ -2263,18 +2270,22 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
     switch (finalByte) {
       case "A": // CUU - Cursor Up
+      case "k": // VPB - Vertical Position Backward (ECMA-48 synonym for CUU)
         curY -= Math.max(parts[0] ?? 1, 1)
         clampCursor()
         break
       case "B": // CUD - Cursor Down
+      case "e": // VPR - Vertical Position Relative (ECMA-48 synonym for CUD)
         curY += Math.max(parts[0] ?? 1, 1)
         clampCursor()
         break
       case "C": // CUF - Cursor Forward
+      case "a": // HPR - Horizontal Position Relative (ECMA-48 synonym for CUF)
         curX += Math.max(parts[0] ?? 1, 1)
         clampCursor()
         break
       case "D": // CUB - Cursor Back
+      case "j": // HPB - Horizontal Position Backward (ECMA-48 synonym for CUB)
         curX -= Math.max(parts[0] ?? 1, 1)
         clampCursor()
         break
@@ -2348,14 +2359,18 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       case "H": // CUP - Cursor Position
       case "f": // HVP - same as CUP
         if (originMode) {
-          // DECOM: positions are relative to scroll region
+          // DECOM: positions are relative to the scrolling region's ORIGIN,
+          // which is its top-LEFT — so with DECLRMM active the column is
+          // relative to the left margin too, not to column 0.
+          const originX = leftRightMarginMode ? leftMargin : 0
+          const limitX = leftRightMarginMode ? rightMargin : cols - 1
           curY = scrollTop + (parts[0] ?? 1) - 1
-          curX = (parts[1] ?? 1) - 1
+          curX = originX + (parts[1] ?? 1) - 1
           // Clamp to scroll region bounds
           if (curY < scrollTop) curY = scrollTop
           if (curY > scrollBottom) curY = scrollBottom
-          if (curX < 0) curX = 0
-          if (curX >= cols) curX = cols - 1
+          if (curX < originX) curX = originX
+          if (curX > limitX) curX = limitX
         } else {
           curY = (parts[0] ?? 1) - 1
           curX = (parts[1] ?? 1) - 1
@@ -5801,10 +5816,22 @@ export function serializeSnapshot(snapshot: Snapshot, options: SerializeOptions 
   // after moving) is placed absolutely first, then origin is restored — the
   // region-relative form would clamp it to the region.
   const origin = m.origin && !excluded.has("origin")
-  const inRegion = snapshot.cursor.y >= snapshot.margins.scrollTop && snapshot.cursor.y <= snapshot.margins.scrollBottom
+  // The region's origin is its top-LEFT: under DECOM a CUP column is relative
+  // to the left margin whenever DECLRMM is active, exactly as the row is
+  // relative to the scroll top. Emitting an absolute column here while the row
+  // was relative shifted the restored cursor right by the left margin.
+  const originX = snapshot.margins.leftRight ? snapshot.margins.left : 0
+  const limitX = snapshot.margins.leftRight ? snapshot.margins.right : snapshot.cols - 1
+  const inRegion =
+    snapshot.cursor.y >= snapshot.margins.scrollTop &&
+    snapshot.cursor.y <= snapshot.margins.scrollBottom &&
+    snapshot.cursor.x >= originX &&
+    snapshot.cursor.x <= limitX
   if (origin && inRegion) {
     out.push("\x1b[?6h")
-    out.push(`\x1b[${String(snapshot.cursor.y - snapshot.margins.scrollTop + 1)};${String(snapshot.cursor.x + 1)}H`)
+    out.push(
+      `\x1b[${String(snapshot.cursor.y - snapshot.margins.scrollTop + 1)};${String(snapshot.cursor.x - originX + 1)}H`,
+    )
   } else {
     out.push(`\x1b[${String(snapshot.cursor.y + 1)};${String(snapshot.cursor.x + 1)}H`)
     if (origin) out.push("\x1b[?6h")
