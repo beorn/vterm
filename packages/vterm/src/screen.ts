@@ -81,6 +81,8 @@ export interface ScreenCell {
   hidden: boolean
   blink: boolean
   wide: boolean
+  /** DECSCA: a selective erase (DECSED/DECSEL) leaves this cell alone. */
+  protected: boolean
   url: string | null
 }
 
@@ -127,6 +129,8 @@ export interface ScreenAttrsSnapshot {
   inverse: boolean
   hidden: boolean
   blink: boolean
+  /** DECSCA — cells written under it resist selective erase. */
+  protected: boolean
   url: string | null
 }
 
@@ -238,6 +242,8 @@ export interface Snapshot {
     focusTracking: boolean
     origin: boolean
     insert: boolean
+    /** LNM — LF also returns the carriage. Absent in older snapshots. */
+    newLine: boolean
     reverseVideo: boolean
     syncOutput: boolean
     kittyKeyboardFlags: number
@@ -584,6 +590,7 @@ const EMPTY_CELL: ScreenCell = Object.freeze({
   hidden: false,
   blink: false,
   wide: false,
+  protected: false,
   url: null,
 })
 
@@ -648,6 +655,10 @@ const F_HAS_FG = 1 << 12
 const F_HAS_BG = 1 << 13
 const F_HAS_UL = 1 << 14
 const F_HAS_URL = 1 << 15
+// Bits 0-8 are flags, 9-11 the underline style (UL_SHIFT/UL_MASK), 12-15 the
+// has-colour/url bits. 16 is the first genuinely free bit — reading the F_*
+// list alone suggested 9-11 were spare, which the underline field disproves.
+const F_PROTECTED = 1 << 16
 
 // Underline-style enum, same order as silvery's 3-bit field: 0=none … 5=dashed.
 const UL_STYLES: readonly UnderlineStyle[] = ["none", "single", "double", "curly", "dotted", "dashed"]
@@ -773,6 +784,7 @@ function makePackedRow(width: number): PackedRow {
     if (a.inverse) m |= F_INVERSE
     if (a.hidden) m |= F_HIDDEN
     if (a.blink) m |= F_BLINK
+    if (a.protected) m |= F_PROTECTED
     if (wide) m |= F_WIDE
     return m | underlineToBits(a.underline)
   }
@@ -872,6 +884,7 @@ function makePackedRow(width: number): PackedRow {
         inverse: (m & F_INVERSE) !== 0,
         hidden: (m & F_HIDDEN) !== 0,
         blink: (m & F_BLINK) !== 0,
+        protected: (m & F_PROTECTED) !== 0,
         wide: (m & F_WIDE) !== 0,
         url: m & F_HAS_URL ? (urlMap!.get(col) ?? null) : null,
       }
@@ -1863,6 +1876,17 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     row.replaceAllFromCells(cells)
   }
 
+  /**
+   * SGR 0 resets the pen but NOT DECSCA: character protection is independent
+   * of SGR, and is cleared only by DECSTR/RIS. Using the full `resetAttrs()`
+   * here would let any `ESC [ 0 m` silently unprotect subsequent writes.
+   */
+  function resetSgrAttrs(): Attrs {
+    const next = resetAttrs()
+    next.protected = attrs.protected
+    return next
+  }
+
   function resetAttrs(): Attrs {
     return {
       fg: null,
@@ -1878,6 +1902,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       hidden: false,
       blink: false,
       url: null,
+      protected: false,
     }
   }
 
@@ -2252,6 +2277,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         // SR — Shift Right (CSI Ps SP A)
         handleShiftRight(Math.max(parts[0] ?? 1, 1))
       }
+      return
+    }
+
+    // DECSCA — Select Character Protection Attribute. Ps 1 protects the cells
+    // written from here on; 0 and 2 (and a missing Ps) clear it. Independent of
+    // SGR: `ESC [ 0 m` does not clear protection.
+    if (intermediates === '"' && finalByte === "q") {
+      attrs.protected = (parts[0] ?? 0) === 1
       return
     }
 
@@ -2786,14 +2819,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       return
     }
 
-    // DECSED / DECSEL — selective erase (CSI ? J / CSI ? K)
-    // We treat selective erase same as normal erase (no DECSCA protection tracking)
+    // DECSED / DECSEL — selective erase (CSI ? J / CSI ? K): spares cells
+    // written while DECSCA was on.
     if (finalByte === "J") {
-      handleEraseDisplay(parts[0] ?? 0)
+      handleEraseDisplay(parts[0] ?? 0, true)
       return
     }
     if (finalByte === "K") {
-      handleEraseLine(parts[0] ?? 0)
+      handleEraseLine(parts[0] ?? 0, true)
       return
     }
 
@@ -2925,24 +2958,24 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   // ── Erase operations ──
 
-  function handleEraseDisplay(mode: number): void {
+  function handleEraseDisplay(mode: number, selective = false): void {
     switch (mode) {
       case 0: // Erase from cursor to end
-        eraseCells(curY, curX, curY, cols - 1)
+        eraseCells(curY, curX, curY, cols - 1, selective)
         for (let row = curY + 1; row < rows; row++) {
-          eraseCells(row, 0, row, cols - 1)
+          eraseCells(row, 0, row, cols - 1, selective)
         }
         break
       case 1: // Erase from start to cursor
         for (let row = 0; row < curY; row++) {
-          eraseCells(row, 0, row, cols - 1)
+          eraseCells(row, 0, row, cols - 1, selective)
         }
-        eraseCells(curY, 0, curY, curX)
+        eraseCells(curY, 0, curY, curX, selective)
         break
       case 2: // Erase entire display
       case 3: // Erase entire display + scrollback
         for (let row = 0; row < rows; row++) {
-          eraseCells(row, 0, row, cols - 1)
+          eraseCells(row, 0, row, cols - 1, selective)
         }
         if (mode === 3) {
           clearScrollback()
@@ -2952,26 +2985,29 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
   }
 
-  function handleEraseLine(mode: number): void {
+  function handleEraseLine(mode: number, selective = false): void {
     const eraseRight = leftRightMarginMode ? rightMargin : cols - 1
     const eraseLeft = leftRightMarginMode ? leftMargin : 0
     switch (mode) {
       case 0: // Erase from cursor to end of line (or right margin)
-        eraseCells(curY, curX, curY, eraseRight)
+        eraseCells(curY, curX, curY, eraseRight, selective)
         break
       case 1: // Erase from start (or left margin) to cursor
-        eraseCells(curY, eraseLeft, curY, curX)
+        eraseCells(curY, eraseLeft, curY, curX, selective)
         break
       case 2: // Erase entire line (within margins if active)
-        eraseCells(curY, eraseLeft, curY, eraseRight)
+        eraseCells(curY, eraseLeft, curY, eraseRight, selective)
         break
     }
   }
 
-  function eraseCells(row: number, startCol: number, _endRow: number, endCol: number): void {
+  function eraseCells(row: number, startCol: number, _endRow: number, endCol: number, selective = false): void {
     const r = grid[row]
     if (!r) return
     for (let col = startCol; col <= endCol && col < cols; col++) {
+      // DECSED/DECSEL erase only UNPROTECTED cells; a cell written while
+      // DECSCA was on survives. Plain ED/EL ignore protection entirely.
+      if (selective && r.getCellRaw(col).protected) continue
       // Fill erased cells with the current background color (BCE).
       r.eraseWithBg(col, attrs.bg)
     }
@@ -3182,7 +3218,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
 
     if (params.length === 0 || (params.length === 1 && params[0] === 0)) {
-      attrs = resetAttrs()
+      attrs = resetSgrAttrs()
       return
     }
 
@@ -3191,7 +3227,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       const code = params[i]!
       switch (code) {
         case 0:
-          attrs = resetAttrs()
+          attrs = resetSgrAttrs()
           break
         case 1:
           attrs.bold = true

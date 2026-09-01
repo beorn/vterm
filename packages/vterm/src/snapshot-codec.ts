@@ -76,6 +76,9 @@ const F_BLINK = 1 << 7
 const F_WIDE = 1 << 8
 const UL_SHIFT = 9
 const UL_MASK = 0x7
+// Bits 0-8 flags, 9-11 underline (UL_SHIFT/UL_MASK). 16 keeps this layout
+// aligned with screen.ts's, where 12-15 are also taken.
+const F_PROTECTED = 1 << 16
 
 const UNDERLINE_STYLES: readonly UnderlineStyle[] = ["none", "single", "double", "curly", "dotted", "dashed"]
 const UNDERLINE_INDEX: Record<UnderlineStyle, number> = {
@@ -398,6 +401,7 @@ function createInterner(): Interner {
     if (cell.inverse) flags |= F_INVERSE
     if (cell.hidden) flags |= F_HIDDEN
     if (cell.blink) flags |= F_BLINK
+    if (cell.protected) flags |= F_PROTECTED
     if (cell.wide) flags |= F_WIDE
     flags |= ulIdx << UL_SHIFT
 
@@ -591,6 +595,7 @@ function makeCell(
     inverse: (style.flags & F_INVERSE) !== 0,
     hidden: (style.flags & F_HIDDEN) !== 0,
     blink: (style.flags & F_BLINK) !== 0,
+    protected: (style.flags & F_PROTECTED) !== 0,
     wide: (style.flags & F_WIDE) !== 0,
     url,
   }

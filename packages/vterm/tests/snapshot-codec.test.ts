@@ -535,4 +535,62 @@ describe("snapshot-codec — size", () => {
       roundTrip(after)
     })
   })
+
+  // ── DECSCA character protection ──────────────────────────────────────
+
+  describe("character protection survives the codec", () => {
+    test("a protected cell keeps its protection through a round trip", () => {
+      const screen = mkScreen(20, 4)
+      // A unprotected, B protected, C unprotected.
+      feed(screen, `A${ESC}[1"qB${ESC}["qC`)
+      const snapshot = screen.snapshot()
+      expect(snapshot.main.grid[0]?.[1]?.protected).toBe(true)
+      expect(snapshot.main.grid[0]?.[0]?.protected).toBe(false)
+      roundTrip(snapshot)
+
+      // And selective erase still spares it after restore.
+      const restored = mkScreen(20, 4)
+      restored.restore(decodeScreenSnapshotBinary(encodeScreenSnapshotBinary(snapshot)))
+      feed(restored, `${ESC}[G${ESC}[?J`)
+      expect(
+        restored
+          .getRow(0)
+          .map((c) => c.char || " ")
+          .join("")
+          .trimEnd(),
+      ).toBe(" B")
+    })
+
+    test("the protection bit does not collide with the underline field", () => {
+      // Protection lives at bit 16 because 9-11 carry the underline style —
+      // reading the F_* constants alone made 9 look free, and a collision here
+      // corrupts underlines rather than failing loudly.
+      const screen = mkScreen(20, 4)
+      feed(screen, `${ESC}[1"q${ESC}[4:3mX`)
+      const cell = screen.getCell(0, 0)
+      expect(cell.protected).toBe(true)
+      expect(cell.underline).toBe("curly")
+      roundTrip(screen.snapshot())
+    })
+
+    test("SGR reset does not clear DECSCA", () => {
+      // Protection is independent of SGR — only DECSTR/RIS clear it.
+      const screen = mkScreen(20, 4)
+      feed(screen, `${ESC}[1"q${ESC}[0mP`)
+      expect(screen.getCell(0, 0).protected).toBe(true)
+    })
+
+    test("a plain ED erases protected cells; only DECSED spares them", () => {
+      const screen = mkScreen(20, 4)
+      feed(screen, `A${ESC}[1"qB${ESC}["qC`)
+      feed(screen, `${ESC}[G${ESC}[J`)
+      expect(
+        screen
+          .getRow(0)
+          .map((c) => c.char || " ")
+          .join("")
+          .trimEnd(),
+      ).toBe("")
+    })
+  })
 })
