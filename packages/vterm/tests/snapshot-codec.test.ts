@@ -47,6 +47,52 @@ function roundTrip(snapshot: Snapshot): Snapshot {
   return decoded
 }
 
+/**
+ * A floor under `JSON.stringify(snapshot).length` — the naive keyed-JSON size the
+ * binary codec exists to replace — computed without ever building that string.
+ *
+ * Measuring the baseline directly means allocating 466 MiB of JSON. That call alone
+ * took 671 ms on a dev host, and the garbage it left dominated everything around it:
+ * the size test below ran 1903 ms here but 5608 ms on a GitHub runner, past Vitest's
+ * 5000 ms default, so `Tests` went red on `main` for commits that touched no code.
+ * The number was never in doubt, only its price.
+ *
+ * Keyed JSON spends its bytes on key names, which every cell repeats in full. So
+ * rebuilding one cell with every field at the shortest JSON its type admits gives a
+ * per-cell size no real cell can undercut: 226 B, against 240 B for a blank cell,
+ * 241 B for a typical terminal-content cell and 341 B for a heavily styled one. This
+ * returns that 226 B times the cell count, and additionally ignores the soft-wrap
+ * flags, palette, parser state and geometry the snapshot also carries. Every one of
+ * those approximations leans the same way — the result sits BELOW the true size — so
+ * a ratio asserted against it is harder to clear than one asserted against
+ * `JSON.stringify`, never easier.
+ *
+ * On this fixture that is 435.4 MiB against a real 466.2 MiB, 93.4% of it, reached in
+ * 1.1 ms instead of 823 ms; the encoded snapshot clears even the lowered bar by 537x
+ * against a threshold of 50. The test after the size test pins the direction.
+ */
+function jsonBaselineFloor(snapshot: Snapshot): number {
+  const sample = snapshot.main.grid[0]?.[0]
+  if (sample === undefined) {
+    throw new Error("jsonBaselineFloor: snapshot carries no cells, so there is nothing to bound")
+  }
+  // Shortest JSON per field type: `true` (4) undercuts `false` (5); `""` (2) undercuts
+  // every other string; `0` (1) every other number; `null` (4) a nullable object.
+  const cheapestCell: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(sample)) {
+    cheapestCell[key] =
+      typeof value === "boolean" ? true : typeof value === "string" ? "" : typeof value === "number" ? 0 : null
+  }
+  // The brackets and commas each grid also pays for are counted as free; dropping
+  // them only pushes the result further below the real size, which is the safe way.
+  const cheapestCellBytes = JSON.stringify(cheapestCell).length
+  let cells = 0
+  for (const row of snapshot.scrollback) cells += row.length
+  for (const row of snapshot.main.grid) cells += row.length
+  for (const row of snapshot.alt.grid) cells += row.length
+  return cheapestCellBytes * cells
+}
+
 // ── Deterministic PRNG (fixed seeds — reproducible property tests) ─────
 
 function mulberry32(seed: number): () => number {
@@ -371,15 +417,41 @@ describe("snapshot-codec — size", () => {
     expect(screen.getScrollbackLength()).toBeGreaterThan(9000)
 
     const encoded = encodeScreenSnapshotBinary(snapshot)
-    const jsonBytes = JSON.stringify(snapshot).length
+    const jsonBytes = jsonBaselineFloor(snapshot)
 
-    // Observed on ~2.02M cells: JSON.stringify ≈ 431 MiB, encoded ≈ 0.82 MiB (~528x
-    // smaller). The km vitest harness rejects console output from tests, so the live
-    // figures are asserted here rather than printed. Both bounds must hold:
+    // Observed on ~2.02M cells: real keyed JSON ≈ 466 MiB and encoded ≈ 0.81 MiB, so
+    // ~575x smaller. `jsonBytes` is the floor under that 466 MiB rather than the
+    // figure itself — see `jsonBaselineFloor` for why building the real string cost
+    // more than this test's whole Vitest budget on a CI runner. The km vitest harness
+    // rejects console output from tests, so the live figures are asserted here rather
+    // than printed. Both bounds must hold:
     //   - comfortably under JSON/50 (the bead's target), and
     //   - under 8 MiB absolute (a hab checkpoint stays cheap).
     expect(encoded.byteLength).toBeLessThan(jsonBytes / 50)
     expect(encoded.byteLength).toBeLessThan(8 * 1024 * 1024)
+  })
+
+  test("the JSON floor never exceeds the real JSON.stringify size it stands in for", () => {
+    // The size test compares against `jsonBaselineFloor` rather than stringifying a
+    // 466 MiB snapshot, which stays honest only while the floor really is a floor.
+    // Pin that at two sizes where the truth is cheap to compute: an all-default
+    // screen, and a densely styled one carrying truecolor, an indexed background, a
+    // curly underline color, DECSCA and a long hyperlink on 386 of its 480 cells.
+    // The styled shape is the one with teeth — measuring a REAL cell instead of the
+    // cheapest conceivable one, the likeliest way to get this wrong, overshoots there
+    // (627 440 against a real 567 212) and fails, while the blank screen alone would
+    // have let it through.
+    const blank = mkScreen(40, 12, 100)
+
+    const styled = mkScreen(40, 12, 100)
+    feed(styled, `${ESC}[1;2;3;4:3;5;7;8;9;53;38;2;1;2;3;48;5;24;58;2;9;9;9m`)
+    feed(styled, `${ESC}[1"q${ESC}]8;;https://x.test/a/deliberately/long/hyperlink/target${ESC}\\`)
+    feed(styled, "汉字 mixed 🎈 content ".repeat(60))
+
+    for (const screen of [blank, styled]) {
+      const snapshot = screen.snapshot()
+      expect(jsonBaselineFloor(snapshot)).toBeLessThanOrEqual(JSON.stringify(snapshot).length)
+    }
   })
 
   // ── ED 3 (erase scrollback) — the production recording-death bug ──────
