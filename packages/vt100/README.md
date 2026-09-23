@@ -21,6 +21,8 @@ Part of the [vterm](https://github.com/beorn/vterm) monorepo.
 
 ## Install
 
+> Install from npm; a git install resolves the TypeScript source and runs only under Bun.
+
 ```bash
 npm install vt100.js
 ```
