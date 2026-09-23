@@ -17,6 +17,7 @@
  * The only honest check is on SCOPE — does the configured typecheck actually
  * read our source? `--listFilesOnly` answers that without compiling or
  * mutating anything.
+ * @reach fs-walk vendor/vterm/packages/**
  */
 import { describe, expect, test } from "vitest"
 import { execFileSync } from "node:child_process"
