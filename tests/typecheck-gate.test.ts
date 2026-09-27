@@ -5,6 +5,7 @@
  *           nothing reports success forever.
  * @level    l0
  * @consumer `bun run typecheck`, and every reviewer who reads its exit code.
+ * @reach fs-walk vendor/vterm/packages/** vendor/vterm/tsconfig.json
  *
  * Why this exists. The repo's typecheck was `tsc --noEmit` at the ROOT, whose
  * tsconfig is `"include": []` with project references — so it compiled ZERO
