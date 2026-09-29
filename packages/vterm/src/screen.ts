@@ -229,6 +229,10 @@ export interface Snapshot {
     originMode: boolean
     autoWrap: boolean
     charsetG0: boolean
+    /** True when DEC Special Graphics is designated as G1. Absent in older snapshots: ASCII. */
+    charsetG1?: boolean
+    /** True when SO has invoked G1 into GL. Absent in older snapshots: SI/G0. */
+    activeG1?: boolean
   }
   attrs: ScreenAttrsSnapshot
   modes: {
@@ -287,6 +291,10 @@ export interface Snapshot {
   }
   unicode: {
     charsetG0: boolean
+    /** True when DEC Special Graphics is designated as G1. Absent in older snapshots: ASCII. */
+    charsetG1?: boolean
+    /** True when SO has invoked G1 into GL. Absent in older snapshots: SI/G0. */
+    activeG1?: boolean
     lastChar: string
     pendingRegionalIndicator: string | null
     afterZWJ: boolean
@@ -1165,6 +1173,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     originMode: boolean
     autoWrap: boolean
     charsetG0: boolean // true = DEC Special Graphics
+    charsetG1: boolean // true = DEC Special Graphics designated as G1
+    activeG1: boolean // true = SO invoked G1 into GL
   }
   let savedState: SavedState = {
     curX: 0,
@@ -1173,6 +1183,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     originMode: false,
     autoWrap: true,
     charsetG0: false,
+    charsetG1: false,
+    activeG1: false,
   }
 
   // Saved cursor for alt screen (separate from DECSC)
@@ -1440,6 +1452,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     assertBoolean("savedState.originMode", saved.originMode)
     assertBoolean("savedState.autoWrap", saved.autoWrap)
     assertBoolean("savedState.charsetG0", saved.charsetG0)
+    if (Object.hasOwn(saved, "charsetG1")) assertBoolean("savedState.charsetG1", saved.charsetG1)
+    if (Object.hasOwn(saved, "activeG1")) assertBoolean("savedState.activeG1", saved.activeG1)
     assertRecord("attrs", value.attrs)
 
     const modes = value.modes
@@ -1543,6 +1557,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     const unicode = value.unicode
     assertRecord("unicode", unicode)
     assertBoolean("unicode.charsetG0", unicode.charsetG0)
+    if (Object.hasOwn(unicode, "charsetG1")) assertBoolean("unicode.charsetG1", unicode.charsetG1)
+    if (Object.hasOwn(unicode, "activeG1")) assertBoolean("unicode.activeG1", unicode.activeG1)
     assertString("unicode.lastChar", unicode.lastChar)
     if (unicode.pendingRegionalIndicator !== null) {
       assertString("unicode.pendingRegionalIndicator", unicode.pendingRegionalIndicator)
@@ -1596,8 +1612,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // Viewport scroll offset
   let viewportOffset = 0
 
-  // Character set: true = DEC Special Graphics (G0)
+  // Character set designations and the GL locking shift.
   let charsetG0 = false
+  let charsetG1 = false
+  let activeG1 = false
 
   // Clipboard (OSC 52)
   let clipboard = ""
@@ -2086,7 +2104,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   function writeChar(ch: string): void {
     // Apply DEC Special Graphics character mapping
-    if (charsetG0 && ch.length === 1) {
+    if ((activeG1 ? charsetG1 : charsetG0) && ch.length === 1) {
       const mapped = DEC_SPECIAL_GRAPHICS[ch]
       if (mapped) ch = mapped
     }
@@ -4036,6 +4054,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
     // Reset character set
     charsetG0 = false
+    charsetG1 = false
+    activeG1 = false
 
     // Reset cursor to home
     curX = 0
@@ -4057,7 +4077,16 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     cursorBlinking = true
     savedCurX = 0
     savedCurY = 0
-    savedState = { curX: 0, curY: 0, attrs: resetAttrs(), originMode: false, autoWrap: true, charsetG0: false }
+    savedState = {
+      curX: 0,
+      curY: 0,
+      attrs: resetAttrs(),
+      originMode: false,
+      autoWrap: true,
+      charsetG0: false,
+      charsetG1: false,
+      activeG1: false,
+    }
     attrs = resetAttrs()
     title = ""
     useAltScreen = false
@@ -4095,6 +4124,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     advancedClipboard = ""
     viewportOffset = 0
     charsetG0 = false
+    charsetG1 = false
+    activeG1 = false
     clipboard = ""
     cwd = ""
     notifications = []
@@ -4313,6 +4344,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             // CR - Carriage Return
             curX = 0
             emitExecute(0x0d)
+          } else if (code === 0x0e) {
+            // SO — invoke G1 into GL.
+            activeG1 = true
+            emitExecute(0x0e)
+          } else if (code === 0x0f) {
+            // SI — invoke G0 into GL.
+            activeG1 = false
+            emitExecute(0x0f)
           } else if (code >= 0x20) {
             // Handle surrogate pairs for characters > U+FFFF
             let char = ch
@@ -4373,6 +4412,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
               originMode,
               autoWrap,
               charsetG0,
+              charsetG1,
+              activeG1,
             }
             parserState = "ground"
             emitEsc("7", "")
@@ -4389,6 +4430,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             originMode = savedState.originMode
             autoWrap = savedState.autoWrap
             charsetG0 = savedState.charsetG0
+            charsetG1 = savedState.charsetG1
+            activeG1 = savedState.activeG1
             clampCursor()
             parserState = "ground"
             emitEsc("8", "")
@@ -4414,10 +4457,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           } else if (ch === "(") {
             // Designate G0 character set
             escIntermediate = "("
+            escBuf = "("
             parserState = "escape_charset"
           } else if (ch === ")") {
-            // Designate G1 character set (ignored, just consume next byte)
+            // Designate G1 character set
             escIntermediate = ")"
+            escBuf = ")"
             parserState = "escape_charset"
           } else if (ch === "=") {
             // DECKPAM - Application Keypad Mode
@@ -4444,14 +4489,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           break
 
         case "escape_charset":
-          // Character set designation: ESC ( 0 = DEC Special Graphics, ESC ( B = ASCII
-          if (ch === "0") {
-            charsetG0 = true
-          } else {
-            charsetG0 = false // B = ASCII, or any other
-          }
+          // The pending designator lives in parser.esc across snapshot/restore.
+          // Old snapshots had an empty buffer here and always designated G0.
+          const designator = escBuf === ")" ? ")" : "("
+          if (designator === ")") charsetG1 = ch === "0"
+          else charsetG0 = ch === "0" // B = ASCII, or any other
+          escBuf = ""
           parserState = "ground"
-          emitEsc(ch, escIntermediate)
+          emitEsc(ch, designator)
           break
 
         case "escape_hash":
@@ -4986,6 +5031,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         originMode: savedState.originMode,
         autoWrap: savedState.autoWrap,
         charsetG0: savedState.charsetG0,
+        charsetG1: savedState.charsetG1,
+        activeG1: savedState.activeG1,
       },
       attrs: cloneAttrsSnapshot(attrs),
       modes: {
@@ -5043,6 +5090,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       },
       unicode: {
         charsetG0,
+        charsetG1,
+        activeG1,
         lastChar,
         pendingRegionalIndicator,
         afterZWJ,
@@ -5089,6 +5138,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       originMode: snapshotValue.savedState.originMode,
       autoWrap: snapshotValue.savedState.autoWrap,
       charsetG0: snapshotValue.savedState.charsetG0,
+      charsetG1: snapshotValue.savedState.charsetG1 ?? false,
+      activeG1: snapshotValue.savedState.activeG1 ?? false,
     }
     attrs = cloneAttrsSnapshot(snapshotValue.attrs)
 
@@ -5143,6 +5194,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     apcOverflow = snapshotValue.parser.apcOverflow ?? false
     utf8PendingBytes = [...snapshotValue.parser.utf8PendingBytes]
     charsetG0 = snapshotValue.unicode.charsetG0
+    charsetG1 = snapshotValue.unicode.charsetG1 ?? false
+    activeG1 = snapshotValue.unicode.activeG1 ?? false
     lastChar = snapshotValue.unicode.lastChar
     pendingRegionalIndicator = snapshotValue.unicode.pendingRegionalIndicator
     afterZWJ = snapshotValue.unicode.afterZWJ
@@ -6092,6 +6145,8 @@ export function serializeSnapshot(snapshot: Snapshot, options: SerializeOptions 
     out.push(`\x1b[${String(serializeCursorStyleCode(snapshot.cursor.shape, snapshot.cursor.blinking))} q`)
   }
   if (snapshot.unicode.charsetG0) out.push("\x1b(0")
+  if (snapshot.unicode.charsetG1) out.push("\x1b)0")
+  if (snapshot.unicode.activeG1) out.push("\x0e")
   if (m.insert && !excluded.has("insert")) out.push("\x1b[4h")
   if (!serializeTabStopsAreDefault(snapshot.tabStops, snapshot.cols)) {
     out.push("\x1b[3g")

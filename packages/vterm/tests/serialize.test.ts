@@ -97,6 +97,8 @@ function stateView(snap: Snapshot): Record<string, unknown> {
     cursorBlinking: snap.cursor.blinking,
     tabStops: snap.tabStops,
     charsetG0: snap.unicode.charsetG0,
+    charsetG1: snap.unicode.charsetG1,
+    activeG1: snap.unicode.activeG1,
     // The LAST index is masked on both sides: a true bit there says the final
     // history row wraps INTO visible screen row 0 — a linkage the positioned
     // paint severs by design (a paint is not a flow), so it cannot round-trip.
@@ -763,6 +765,30 @@ describe("serializeSnapshot — mode emission", () => {
     // 'q' under DEC Special Graphics stored as the translated glyph; the paint
     // (which runs under ASCII) must reproduce it literally.
     expect(sink.getCell(0, 0).char).toBe(source.getCell(0, 0).char)
+  })
+
+  test("G1 designation and invoked GL survive ANSI repaint and the next printed character", () => {
+    const source = mkScreen(20, 3)
+    feed(source, `${ESC}(B${ESC})0\x0el`)
+    expect(source.snapshot().unicode).toMatchObject({ charsetG0: false, charsetG1: true, activeG1: true })
+    const ansi = serializeSnapshot(source.snapshot())
+    expect(ansi).toContain(`${ESC})0`)
+    expect(ansi).toContain("\x0e")
+    const sink = roundTripState(source, 20, 3)
+    feed(sink, "l")
+    expect(sink.getCell(0, 1).char).toBe("┌")
+  })
+
+  test("inactive but designated G1 survives ANSI repaint without invoking it", () => {
+    const source = mkScreen(20, 3)
+    feed(source, `${ESC})0`)
+    expect(source.snapshot().unicode).toMatchObject({ charsetG0: false, charsetG1: true, activeG1: false })
+    const ansi = serializeSnapshot(source.snapshot())
+    expect(ansi).toContain(`${ESC})0`)
+    expect(ansi).not.toContain("\x0e")
+    const sink = roundTripState(source, 20, 3)
+    feed(sink, "l\x0el")
+    expect([sink.getCell(0, 0).char, sink.getCell(0, 1).char]).toEqual(["l", "┌"])
   })
 
   test("DECSCUSR emitted only when non-default (default is blinking block)", () => {

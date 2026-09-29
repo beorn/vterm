@@ -307,6 +307,18 @@ describe("snapshot-codec — round-trip deep equality", () => {
     expect(decoded.parser.esc).toBe("38;2;1")
   })
 
+  test("binary snapshot resumes a pending G1 designation and retains new charset state", () => {
+    const screen = mkScreen(10, 2)
+    feed(screen, `${ESC})`)
+    const pending = screen.snapshot()
+    expect(pending.parser).toMatchObject({ state: "escape_charset", esc: ")" })
+    const restored = mkScreen(10, 2)
+    restored.restore(roundTrip(pending))
+    feed(restored, "0\x0el")
+    expect(restored.getCell(0, 0).char).toBe("┌")
+    expect(restored.snapshot().unicode).toMatchObject({ charsetG0: false, charsetG1: true, activeG1: true })
+  })
+
   test("resized-then-written screen (ragged scrollback vs current cols)", () => {
     const screen = mkScreen(80, 6, 4000)
     for (let i = 0; i < 30; i++) feed(screen, `line ${String(i)} at width eighty\r\n`)

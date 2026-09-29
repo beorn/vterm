@@ -726,6 +726,29 @@ describe("DEC Special Graphics character set", () => {
     expect(screen.getCell(0, 1).char).toBe("q") // Normal q
   })
 
+  test("G0 and G1 designations remain independent while SO and SI select GL", () => {
+    const screen = screenWith("A\x1b(B\x1b)0l\x0el\x0flZ", { cols: 10, rows: 2 })
+    expect(Array.from({ length: 5 }, (_, col) => screen.getCell(0, col).char)).toEqual(["A", "l", "┌", "l", "Z"])
+    expect(screen.snapshot().unicode).toMatchObject({ charsetG0: false, charsetG1: true, activeG1: false })
+
+    const opposite = screenWith("\x1b(0\x1b)B\x0el\x0fl", { cols: 10, rows: 2 })
+    expect([opposite.getCell(0, 0).char, opposite.getCell(0, 1).char]).toEqual(["l", "┌"])
+  })
+
+  test.each(["\x1b[!p", "\x1bc"])("%s resets both designations and GL selection", (reset) => {
+    const screen = screenWith("\x1b(0\x1b)0\x0e", { cols: 10, rows: 2 })
+    screen.process(enc.encode(reset + "l"))
+    expect(screen.getCell(0, 0).char).toBe("l")
+    expect(screen.snapshot().unicode).toMatchObject({ charsetG0: false, charsetG1: false, activeG1: false })
+  })
+
+  test("DECSC and DECRC save and restore both designations and GL selection", () => {
+    const screen = screenWith("\x1b(0\x1b)0\x0e\x1b7\x1b(B\x1b)B\x0f\x1b8l", { cols: 10, rows: 2 })
+    expect(screen.getCell(0, 0).char).toBe("┌")
+    expect(screen.snapshot().savedState).toMatchObject({ charsetG0: true, charsetG1: true, activeG1: true })
+    expect(screen.snapshot().unicode).toMatchObject({ charsetG0: true, charsetG1: true, activeG1: true })
+  })
+
   test("full box drawing", () => {
     const screen = screenWith("\x1b(0lqkxxx")
     expect(screen.getCell(0, 0).char).toBe("\u250c") // ┌
@@ -2330,6 +2353,8 @@ describe("snapshot / restore", () => {
       apcStart: { row: 0, col: 0 },
       utf8PendingBytes: [],
     })
+    expect(snapshot.unicode).toMatchObject({ charsetG0: false, charsetG1: false, activeG1: false })
+    expect(snapshot.savedState).toMatchObject({ charsetG0: false, charsetG1: false, activeG1: false })
   })
 
   test("rejects unsupported snapshot versions", () => {
@@ -2351,6 +2376,60 @@ describe("snapshot / restore", () => {
       target.restore(malformed)
     }).toThrow(/Invalid vterm snapshot colors/)
     expect(target.snapshot()).toEqual(before)
+  })
+
+  test("optional charset fields reject wrong types atomically without editing the caller snapshot", () => {
+    const target = screenWith("target", { cols: 10, rows: 2 })
+    const before = target.snapshot()
+    const donor = screenWith("\x1b)0\x0e", { cols: 10, rows: 2 }).snapshot()
+    for (const section of ["unicode", "savedState"] as const) {
+      for (const key of ["charsetG1", "activeG1"] as const) {
+        for (const invalid of ["not-a-boolean", undefined]) {
+          const malformed = structuredClone(donor)
+          Reflect.set(malformed[section], key, invalid)
+          const inputBefore = structuredClone(malformed)
+          expect(() => target.restore(malformed), `${section}.${key}=${String(invalid)}`).toThrow(
+            `Invalid vterm snapshot ${section}.${key}`,
+          )
+          expect(target.snapshot(), `${section}.${key}`).toEqual(before)
+          expect(malformed, `${section}.${key} input`).toEqual(inputBefore)
+        }
+      }
+    }
+  })
+
+  test("old snapshots default absent G1 and GL fields without mutating the input", () => {
+    const source = screenWith("\x1b)0\x0e", { cols: 10, rows: 2 })
+    const old = source.snapshot()
+    delete old.unicode.charsetG1
+    delete old.unicode.activeG1
+    delete old.savedState.charsetG1
+    delete old.savedState.activeG1
+    const inputBefore = JSON.stringify(old)
+    const restored = createVtermScreen({ cols: 10, rows: 2 })
+    restored.restore(old)
+    restored.process(enc.encode("l"))
+    expect(restored.getCell(0, 0).char).toBe("l")
+    expect(restored.snapshot().unicode).toMatchObject({ charsetG1: false, activeG1: false })
+    expect(JSON.stringify(old)).toBe(inputBefore)
+  })
+
+  test("a pending G1 designator survives JSON snapshot and old empty-buffer pending state selects G0", () => {
+    const pending = screenWith("\x1b)", { cols: 10, rows: 2 }).snapshot()
+    expect(pending.parser).toMatchObject({ state: "escape_charset", esc: ")" })
+    const restored = createVtermScreen({ cols: 10, rows: 2 })
+    restored.restore(JSON.parse(JSON.stringify(pending)) as Snapshot)
+    restored.process(enc.encode("0\x0el"))
+    expect(restored.getCell(0, 0).char).toBe("┌")
+    expect(restored.snapshot().unicode).toMatchObject({ charsetG0: false, charsetG1: true, activeG1: true })
+
+    const old = screenWith("\x1b(", { cols: 10, rows: 2 }).snapshot()
+    old.parser.esc = ""
+    const oldRestored = createVtermScreen({ cols: 10, rows: 2 })
+    oldRestored.restore(old)
+    oldRestored.process(enc.encode("0l"))
+    expect(oldRestored.getCell(0, 0).char).toBe("┌")
+    expect(oldRestored.snapshot().unicode).toMatchObject({ charsetG0: true, charsetG1: false, activeG1: false })
   })
 
   test("resumes CSI, OSC, DCS, and UTF-8 parser cut points", () => {
