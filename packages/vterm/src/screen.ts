@@ -750,28 +750,28 @@ function makePackedRow(width: number): PackedRow {
   let urlMap: Map<number, string> | null = null
 
   function setFg(col: number, c: Color): void {
-    if (fgRgb === null) {
+    if (fgRgb === null || fgIdx === null) {
       fgRgb = new Uint32Array(width)
       fgIdx = new Int16Array(width)
     }
     fgRgb[col] = packRgb(c)
-    required(fgIdx, "foreground color index plane")[col] = c.index ?? -1
+    fgIdx[col] = c.index ?? -1
   }
   function setBg(col: number, c: Color): void {
-    if (bgRgb === null) {
+    if (bgRgb === null || bgIdx === null) {
       bgRgb = new Uint32Array(width)
       bgIdx = new Int16Array(width)
     }
     bgRgb[col] = packRgb(c)
-    required(bgIdx, "background color index plane")[col] = c.index ?? -1
+    bgIdx[col] = c.index ?? -1
   }
   function setUl(col: number, c: Color): void {
-    if (ulRgb === null) {
+    if (ulRgb === null || ulIdx === null) {
       ulRgb = new Uint32Array(width)
       ulIdx = new Int16Array(width)
     }
     ulRgb[col] = packRgb(c)
-    required(ulIdx, "underline color index plane")[col] = c.index ?? -1
+    ulIdx[col] = c.index ?? -1
   }
   function setUrl(col: number, u: string): void {
     ;(urlMap ??= new Map<number, string>()).set(col, u)
@@ -2042,8 +2042,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         }
       }
       for (let i = top; i < bottom; i++) {
-        grid[i] = itemAt(grid, i + 1, "scroll source rows")
-        softWrapped[i] = itemAt(softWrapped, i + 1, "scroll source wrap flags")
+        // The region bounds prove both reads; keep this flood path free of per-row guards.
+        grid[i] = grid[i + 1] as PackedRow
+        softWrapped[i] = softWrapped[i + 1] as boolean
       }
       grid[bottom] = makeRow(cols)
       softWrapped[bottom] = false
@@ -2256,7 +2257,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
     // Pack the printed cell straight from the current drawing attrs — no ScreenCell
     // heap object is allocated on the flood path (the packed-grid perf win).
-    const row = itemAt(grid, curY, "cursor row")
+    // Zero dimensions returned above and cursor movement clamps curY, so this hot read is in bounds.
+    const row = grid[curY] as PackedRow
     row.writeFromAttrs(curX, ch, attrs, wide)
 
     if (wide) {
@@ -4342,7 +4344,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     const text = decodeInput(data)
 
     for (let i = 0; i < text.length; i++) {
-      const ch = text.charAt(i)
+      // The loop bound proves this code-unit read; an assertion preserves the parser's zero-overhead flood path.
+      const ch = text[i] as string
       const code = text.charCodeAt(i)
 
       switch (parserState) {
@@ -4380,7 +4383,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
               const nextCode = text.charCodeAt(i + 1)
               if (nextCode >= 0xdc00 && nextCode <= 0xdfff) {
-                char = ch + text.charAt(i + 1)
+                char = ch + (text[i + 1] as string)
                 i++
               }
             }
