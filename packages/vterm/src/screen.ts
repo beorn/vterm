@@ -680,10 +680,17 @@ function bitsToUnderline(meta: number): UnderlineStyle {
   return UL_STYLES[(meta & UL_MASK) >> UL_SHIFT] ?? "none"
 }
 
-/** Copy a color preserving its palette-origin `index` (identity), or null through. */
-function copyColor(c: Color | null): Color | null {
-  if (c === null) return null
-  return c.index === undefined ? { r: c.r, g: c.g, b: c.b } : { r: c.r, g: c.g, b: c.b, index: c.index }
+/** Require an invariant-owned value and fail where the impossible state is first observed. */
+function required<T>(value: T | null | undefined, subject: string): T {
+  if (value === null || value === undefined) throw new Error(`Missing ${subject}`)
+  return value
+}
+
+/** Read a dense indexed value and fail at the violated invariant instead of propagating `undefined`. */
+function itemAt<T>(items: ArrayLike<T>, index: number, subject: string): T {
+  const value = items[index]
+  if (value === undefined) throw new RangeError(`${subject}[${index}] is outside its ${items.length}-item range`)
+  return value
 }
 
 /**
@@ -751,28 +758,28 @@ function makePackedRow(width: number): PackedRow {
   let urlMap: Map<number, string> | null = null
 
   function setFg(col: number, c: Color): void {
-    if (fgRgb === null) {
+    if (fgRgb === null || fgIdx === null) {
       fgRgb = new Uint32Array(width)
       fgIdx = new Int16Array(width)
     }
     fgRgb[col] = packRgb(c)
-    fgIdx![col] = c.index ?? -1
+    fgIdx[col] = c.index ?? -1
   }
   function setBg(col: number, c: Color): void {
-    if (bgRgb === null) {
+    if (bgRgb === null || bgIdx === null) {
       bgRgb = new Uint32Array(width)
       bgIdx = new Int16Array(width)
     }
     bgRgb[col] = packRgb(c)
-    bgIdx![col] = c.index ?? -1
+    bgIdx[col] = c.index ?? -1
   }
   function setUl(col: number, c: Color): void {
-    if (ulRgb === null) {
+    if (ulRgb === null || ulIdx === null) {
       ulRgb = new Uint32Array(width)
       ulIdx = new Int16Array(width)
     }
     ulRgb[col] = packRgb(c)
-    ulIdx![col] = c.index ?? -1
+    ulIdx[col] = c.index ?? -1
   }
   function setUrl(col: number, u: string): void {
     ;(urlMap ??= new Map<number, string>()).set(col, u)
@@ -862,12 +869,12 @@ function makePackedRow(width: number): PackedRow {
     },
 
     widen(col) {
-      meta[col] = (meta[col]! | F_WIDE) >>> 0
+      meta[col] = (itemAt(meta, col, "packed row metadata") | F_WIDE) >>> 0
       if (col + 1 < width) row.setEmpty(col + 1)
     },
 
     appendChar(col, ch) {
-      chars[col] = chars[col]! + ch
+      chars[col] = itemAt(chars, col, "packed row characters") + ch
     },
 
     copyCellFrom(col, src, srcCol) {
@@ -876,17 +883,35 @@ function makePackedRow(width: number): PackedRow {
     },
 
     getCellRaw(col) {
-      const m = meta[col]!
+      const m = itemAt(meta, col, "packed row metadata")
       if (m === 0 && chars[col] === "") return emptyCell()
       return {
-        char: chars[col]!,
-        fg: m & F_HAS_FG ? unpackColor(fgRgb![col]!, fgIdx![col]!) : null,
-        bg: m & F_HAS_BG ? unpackColor(bgRgb![col]!, bgIdx![col]!) : null,
+        char: itemAt(chars, col, "packed row characters"),
+        fg:
+          m & F_HAS_FG
+            ? unpackColor(
+                itemAt(required(fgRgb, "foreground color plane"), col, "foreground color plane"),
+                itemAt(required(fgIdx, "foreground color index plane"), col, "foreground color index plane"),
+              )
+            : null,
+        bg:
+          m & F_HAS_BG
+            ? unpackColor(
+                itemAt(required(bgRgb, "background color plane"), col, "background color plane"),
+                itemAt(required(bgIdx, "background color index plane"), col, "background color index plane"),
+              )
+            : null,
         bold: (m & F_BOLD) !== 0,
         faint: (m & F_FAINT) !== 0,
         italic: (m & F_ITALIC) !== 0,
         underline: bitsToUnderline(m),
-        underlineColor: m & F_HAS_UL ? unpackColor(ulRgb![col]!, ulIdx![col]!) : null,
+        underlineColor:
+          m & F_HAS_UL
+            ? unpackColor(
+                itemAt(required(ulRgb, "underline color plane"), col, "underline color plane"),
+                itemAt(required(ulIdx, "underline color index plane"), col, "underline color index plane"),
+              )
+            : null,
         overline: (m & F_OVERLINE) !== 0,
         strikethrough: (m & F_STRIKE) !== 0,
         inverse: (m & F_INVERSE) !== 0,
@@ -894,12 +919,12 @@ function makePackedRow(width: number): PackedRow {
         blink: (m & F_BLINK) !== 0,
         protected: (m & F_PROTECTED) !== 0,
         wide: (m & F_WIDE) !== 0,
-        url: m & F_HAS_URL ? (urlMap!.get(col) ?? null) : null,
+        url: m & F_HAS_URL ? (required(urlMap, "packed row URL map").get(col) ?? null) : null,
       }
     },
 
     toCells() {
-      const out: ScreenCell[] = new Array(width)
+      const out = new Array<ScreenCell>(width)
       for (let c = 0; c < width; c++) out[c] = row.getCellRaw(c)
       return out
     },
@@ -913,11 +938,11 @@ function makePackedRow(width: number): PackedRow {
     },
 
     getChar(col) {
-      return chars[col]!
+      return itemAt(chars, col, "packed row characters")
     },
 
     isWide(col) {
-      return (meta[col]! & F_WIDE) !== 0
+      return (itemAt(meta, col, "packed row metadata") & F_WIDE) !== 0
     },
   }
   return row
@@ -957,7 +982,11 @@ function buildPalette256(): Color[] {
   for (let r = 0; r < 6; r++) {
     for (let g = 0; g < 6; g++) {
       for (let b = 0; b < 6; b++) {
-        palette.push({ r: levels[r]!, g: levels[g]!, b: levels[b]! })
+        palette.push({
+          r: itemAt(levels, r, "ANSI cube red levels"),
+          g: itemAt(levels, g, "ANSI cube green levels"),
+          b: itemAt(levels, b, "ANSI cube blue levels"),
+        })
       }
     }
   }
@@ -985,12 +1014,16 @@ function parseColorSpec(spec: string): Color | null {
       const max = Math.pow(16, hex.length) - 1
       return Math.round((v * 255) / max)
     }
-    return { r: scale(rgbMatch[1]!), g: scale(rgbMatch[2]!), b: scale(rgbMatch[3]!) }
+    return {
+      r: scale(itemAt(rgbMatch, 1, "X11 red capture")),
+      g: scale(itemAt(rgbMatch, 2, "X11 green capture")),
+      b: scale(itemAt(rgbMatch, 3, "X11 blue capture")),
+    }
   }
   // #RRGGBB
   const hex6 = /^#([0-9a-fA-F]{6})$/.exec(s)
   if (hex6) {
-    const v = hex6[1]!
+    const v = itemAt(hex6, 1, "six-digit hex capture")
     return {
       r: parseInt(v.substring(0, 2), 16),
       g: parseInt(v.substring(2, 4), 16),
@@ -1000,9 +1033,13 @@ function parseColorSpec(spec: string): Color | null {
   // #RGB (expand each nibble)
   const hex3 = /^#([0-9a-fA-F]{3})$/.exec(s)
   if (hex3) {
-    const v = hex3[1]!
+    const v = itemAt(hex3, 1, "three-digit hex capture")
     const expand = (ch: string): number => parseInt(ch + ch, 16)
-    return { r: expand(v[0]!), g: expand(v[1]!), b: expand(v[2]!) }
+    return {
+      r: expand(itemAt(v, 0, "short hex red channel")),
+      g: expand(itemAt(v, 1, "short hex green channel")),
+      b: expand(itemAt(v, 2, "short hex blue channel")),
+    }
   }
   return null
 }
@@ -1638,8 +1675,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let sixelImages: SixelImage[] = []
 
   // Soft-wrap tracking: true if the line break at end of this row was caused by auto-wrap
-  let mainSoftWrapped: boolean[] = new Array(rows).fill(false)
-  let altSoftWrapped: boolean[] = new Array(rows).fill(false)
+  let mainSoftWrapped = new Array<boolean>(rows).fill(false)
+  let altSoftWrapped = new Array<boolean>(rows).fill(false)
   let softWrapped = mainSoftWrapped
   // Per-row DEC line attributes: 0 normal (DECSWL), 1 double-width (DECDWL),
   // 2 double-height top (DECDHL), 3 double-height bottom. A parallel array per
@@ -1841,14 +1878,18 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
     let continuationCount = 0
     let leadIndex = bytes.length - 1
-    while (leadIndex >= 0 && (bytes[leadIndex]! & 0xc0) === 0x80 && continuationCount < 3) {
+    while (
+      leadIndex >= 0 &&
+      (itemAt(bytes, leadIndex, "UTF-8 pending bytes") & 0xc0) === 0x80 &&
+      continuationCount < 3
+    ) {
       continuationCount++
       leadIndex--
     }
 
     if (leadIndex < 0) return bytes.length
 
-    const lead = bytes[leadIndex]!
+    const lead = itemAt(bytes, leadIndex, "UTF-8 lead byte")
     const expectedLength = utf8SequenceLength(lead)
     if (expectedLength === 0) return bytes.length
 
@@ -1979,14 +2020,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       const lm = leftMargin
       const rm = rightMargin
       for (let r = top; r < bottom; r++) {
-        const srcRow = grid[r + 1]!
-        const dstRow = grid[r]!
+        const srcRow = itemAt(grid, r + 1, "scroll source rows")
+        const dstRow = itemAt(grid, r, "scroll destination rows")
         for (let c = lm; c <= rm && c < cols; c++) {
           dstRow.copyCellFrom(c, srcRow, c)
         }
       }
       // Clear the bottom row within margins
-      const bottomRow = grid[bottom]!
+      const bottomRow = itemAt(grid, bottom, "scroll bottom row")
       for (let c = lm; c <= rm && c < cols; c++) {
         bottomRow.setEmpty(c)
       }
@@ -2019,8 +2060,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         }
       }
       for (let i = top; i < bottom; i++) {
-        grid[i] = grid[i + 1]!
-        softWrapped[i] = softWrapped[i + 1]!
+        // The region bounds prove both reads; keep this flood path free of per-row guards.
+        grid[i] = grid[i + 1] as PackedRow
+        softWrapped[i] = softWrapped[i + 1] as boolean
       }
       grid[bottom] = makeRow(cols)
       softWrapped[bottom] = false
@@ -2044,21 +2086,21 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       const lm = leftMargin
       const rm = rightMargin
       for (let r = bottom; r > top; r--) {
-        const srcRow = grid[r - 1]!
-        const dstRow = grid[r]!
+        const srcRow = itemAt(grid, r - 1, "reverse-scroll source rows")
+        const dstRow = itemAt(grid, r, "reverse-scroll destination rows")
         for (let c = lm; c <= rm && c < cols; c++) {
           dstRow.copyCellFrom(c, srcRow, c)
         }
       }
       // Clear the top row within margins
-      const topRow = grid[top]!
+      const topRow = itemAt(grid, top, "reverse-scroll top row")
       for (let c = lm; c <= rm && c < cols; c++) {
         topRow.setEmpty(c)
       }
     } else {
       for (let i = bottom; i > top; i--) {
-        grid[i] = grid[i - 1]!
-        softWrapped[i] = softWrapped[i - 1]!
+        grid[i] = itemAt(grid, i - 1, "reverse-scroll source rows")
+        softWrapped[i] = itemAt(softWrapped, i - 1, "reverse-scroll source wrap flags")
       }
       grid[top] = makeRow(cols)
       softWrapped[top] = false
@@ -2088,7 +2130,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       if (prevRow < 0) return null
       prevCol = cols - 1
     }
-    const row = grid[prevRow]!
+    const row = itemAt(grid, prevRow, "previous-cell rows")
     // If we landed on the trailing half of a wide character, step back to the wide cell.
     if (prevCol > 0 && row.getChar(prevCol) === "" && row.isWide(prevCol - 1)) {
       prevCol--
@@ -2222,7 +2264,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     // Insert mode: shift existing characters right before writing
     if (insertMode) {
       const insertEnd = leftRightMarginMode ? rightMargin + 1 : cols
-      mutateRowAsCells(grid[curY]!, (cells) => {
+      mutateRowAsCells(itemAt(grid, curY, "cursor row"), (cells) => {
         for (let i = 0; i < charWidth; i++) {
           // Shift cells right within margin, dropping the cell at the right edge
           cells.splice(insertEnd - 1, 1)
@@ -2233,7 +2275,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
     // Pack the printed cell straight from the current drawing attrs — no ScreenCell
     // heap object is allocated on the flood path (the packed-grid perf win).
-    const row = grid[curY]!
+    // Zero dimensions returned above and cursor movement clamps curY, so this hot read is in bounds.
+    const row = grid[curY] as PackedRow
     row.writeFromAttrs(curX, ch, attrs, wide)
 
     if (wide) {
@@ -2332,7 +2375,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         const { t, l, b, r } = normalizeRect(parts[1] ?? 1, parts[2] ?? 1, parts[3] ?? rows, parts[4] ?? cols)
         const fillChar = String.fromCharCode(charCode)
         for (let row = t; row <= b && row < rows; row++) {
-          const gr = grid[row]!
+          const gr = itemAt(grid, row, "rectangular erase rows")
           for (let col = l; col <= r && col < cols; col++) {
             const cell = emptyCell()
             cell.char = fillChar
@@ -2345,7 +2388,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         // DECSERA — Selective Erase Rectangular Area (finalByte '{', treated identically in headless mode)
         const { t, l, b, r } = normalizeRect(parts[0] ?? 1, parts[1] ?? 1, parts[2] ?? rows, parts[3] ?? cols)
         for (let row = t; row <= b && row < rows; row++) {
-          const gr = grid[row]!
+          const gr = itemAt(grid, row, "rectangular fill rows")
           for (let col = l; col <= r && col < cols; col++) {
             gr.setEmpty(col)
           }
@@ -2372,11 +2415,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         for (let row = 0; row < h; row++) {
           const dr = dstTop + row
           if (dr < 0 || dr >= rows) continue
-          const dstRow = grid[dr]!
+          const dstRow = itemAt(grid, dr, "rectangular copy destination rows")
           for (let col = 0; col < w; col++) {
             const dc = dstLeft + col
             if (dc < 0 || dc >= cols) continue
-            dstRow.setCellRaw(dc, snapshot[row]![col]!)
+            dstRow.setCellRaw(dc, itemAt(itemAt(snapshot, row, "rectangular copy rows"), col, "rectangular copy cells"))
           }
         }
         markScreenRowsDirty(Math.max(0, dstTop), Math.min(dstTop + h - 1, rows - 1))
@@ -2388,7 +2431,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         const sgrParts = parts.slice(4)
         const reverse = finalByte === "t"
         for (let row = t; row <= b && row < rows; row++) {
-          const gr = grid[row]!
+          const gr = itemAt(grid, row, "rectangular attribute rows")
           for (let col = l; col <= r && col < cols; col++) {
             const cell = gr.getCellRaw(col)
             applyRectAttrs(cell, sgrParts, reverse)
@@ -2910,7 +2953,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             savedCurY = curY
             useAltScreen = true
             altGrid = makeGrid(cols, rows)
-            altSoftWrapped = new Array(rows).fill(false)
+            altSoftWrapped = new Array<boolean>(rows).fill(false)
             altLineAttrs = new Array<number>(rows).fill(0)
             grid = altGrid
             softWrapped = altSoftWrapped
@@ -3229,7 +3272,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       if (seg.includes(":")) {
         const subs = seg.split(":").map((s) => (s === "" ? 0 : parseInt(s, 10)))
         subParams.set(params.length, subs)
-        params.push(subs[0]!)
+        params.push(itemAt(subs, 0, "SGR sub-parameters"))
       } else {
         params.push(seg === "" ? 0 : parseInt(seg, 10))
       }
@@ -3242,7 +3285,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
     let i = 0
     while (i < params.length) {
-      const code = params[i]!
+      const code = itemAt(params, i, "SGR parameters")
       switch (code) {
         case 0:
           attrs = resetSgrAttrs()
@@ -3260,7 +3303,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           // SGR 4 with optional sub-parameter: 4:0=none, 4:1=single, 4:3=curly, etc.
           const subs = subParams.get(i)
           if (subs && subs.length > 1) {
-            const sub = subs[1]!
+            const sub = itemAt(subs, 1, "underline style sub-parameters")
             switch (sub) {
               case 0:
                 attrs.underline = "none"
@@ -3338,7 +3381,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case 35:
         case 36:
         case 37:
-          attrs.fg = { ...palette256[code - 30]!, index: code - 30 } // basic fg 30-37 → palette idx 0-7
+          attrs.fg = { ...itemAt(palette256, code - 30, "basic foreground palette"), index: code - 30 } // basic fg 30-37 → palette idx 0-7
           break
         case 38: {
           // Extended foreground: 38;5;N (256) or 38;2;R;G;B (truecolor)
@@ -3368,7 +3411,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case 45:
         case 46:
         case 47:
-          attrs.bg = { ...palette256[code - 40]!, index: code - 40 } // basic bg 40-47 → palette idx 0-7
+          attrs.bg = { ...itemAt(palette256, code - 40, "basic background palette"), index: code - 40 } // basic bg 40-47 → palette idx 0-7
           break
         case 48: {
           // Extended background: 48;5;N (256) or 48;2;R;G;B (truecolor)
@@ -3422,7 +3465,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case 95:
         case 96:
         case 97:
-          attrs.fg = { ...palette256[code - 90 + 8]!, index: code - 90 + 8 } // bright fg 90-97 → palette idx 8-15
+          attrs.fg = {
+            ...itemAt(palette256, code - 90 + 8, "bright foreground palette"),
+            index: code - 90 + 8,
+          } // bright fg 90-97 → palette idx 8-15
           break
         // Bright background 100-107
         case 100:
@@ -3433,7 +3479,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case 105:
         case 106:
         case 107:
-          attrs.bg = { ...palette256[code - 100 + 8]!, index: code - 100 + 8 } // bright bg 100-107 → palette idx 8-15
+          attrs.bg = {
+            ...itemAt(palette256, code - 100 + 8, "bright background palette"),
+            index: code - 100 + 8,
+          } // bright bg 100-107 → palette idx 8-15
           break
       }
       i++
@@ -3445,7 +3494,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
     const type = params[startIndex + 1]
     if (type === 5 && startIndex + 2 < params.length) {
-      const idx = params[startIndex + 2]!
+      const idx = itemAt(params, startIndex + 2, "indexed color parameters")
       // 256-color (`38;5;N` / `48;5;N` / `58;5;N`) → tag the origin index so the
       // serializer re-emits the indexed form. A malformed out-of-range N has no
       // palette entry, so fall back to bare black with NO index (never emit `x8;5;>255`).
@@ -3455,9 +3504,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     } else if (type === 2 && startIndex + 4 < params.length) {
       return {
         color: {
-          r: params[startIndex + 2]!,
-          g: params[startIndex + 3]!,
-          b: params[startIndex + 4]!,
+          r: itemAt(params, startIndex + 2, "truecolor red parameter"),
+          g: itemAt(params, startIndex + 3, "truecolor green parameter"),
+          b: itemAt(params, startIndex + 4, "truecolor blue parameter"),
         },
         nextIndex: startIndex + 5,
       }
@@ -3470,7 +3519,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     if (subs.length < 3) return null
     const type = subs[1]
     if (type === 5 && subs.length >= 3) {
-      const idx = subs[2]!
+      const idx = itemAt(subs, 2, "indexed color sub-parameters")
       // Colon form `38:5:N` etc. — same index-tagging as the semicolon form above.
       const entry = palette256[idx]
       return entry ? { ...entry, index: idx } : { r: 0, g: 0, b: 0 }
@@ -3480,11 +3529,23 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         // 38:2:R:G:B (no colorspace) or 38:2:cs:R:G:B
         // If subs.length >= 6, assume colorspace variant
         if (subs.length >= 6) {
-          return { r: subs[3]!, g: subs[4]!, b: subs[5]! }
+          return {
+            r: itemAt(subs, 3, "colorspace red sub-parameter"),
+            g: itemAt(subs, 4, "colorspace green sub-parameter"),
+            b: itemAt(subs, 5, "colorspace blue sub-parameter"),
+          }
         }
-        return { r: subs[2]!, g: subs[3]!, b: subs[4]! }
+        return {
+          r: itemAt(subs, 2, "truecolor red sub-parameter"),
+          g: itemAt(subs, 3, "truecolor green sub-parameter"),
+          b: itemAt(subs, 4, "truecolor blue sub-parameter"),
+        }
       } else if (subs.length >= 4) {
-        return { r: subs[2]!, g: subs[3]!, b: 0 }
+        return {
+          r: itemAt(subs, 2, "partial truecolor red sub-parameter"),
+          g: itemAt(subs, 3, "partial truecolor green sub-parameter"),
+          b: 0,
+        }
       }
     }
     return null
@@ -3545,8 +3606,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         // Multiple pairs allowed: "c1;spec1;c2;spec2;..."; we parse sequentially.
         const fields = value.split(";")
         for (let fi = 0; fi + 1 < fields.length; fi += 2) {
-          const idx = parseInt(fields[fi]!, 10)
-          const spec = fields[fi + 1]!
+          const idx = parseInt(itemAt(fields, fi, "OSC 4 palette fields"), 10)
+          const spec = itemAt(fields, fi + 1, "OSC 4 palette fields")
           if (isNaN(idx) || idx < 0 || idx > 255) continue
           if (spec === "?") {
             const c = palette256[idx]
@@ -3563,8 +3624,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         // Layered on top of the 256-palette indices (i.e. stored at palette index 256+c by xterm).
         const fields = value.split(";")
         for (let fi = 0; fi + 1 < fields.length; fi += 2) {
-          const idx = parseInt(fields[fi]!, 10)
-          const spec = fields[fi + 1]!
+          const idx = parseInt(itemAt(fields, fi, "OSC 5 special-color fields"), 10)
+          const spec = itemAt(fields, fi + 1, "OSC 5 special-color fields")
           if (isNaN(idx) || idx < 0 || idx > 4) continue
           if (spec === "?") {
             const c = specialColors.get(idx)
@@ -3674,7 +3735,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           // Resolve key → get/set helpers
           const paletteMatch = /^color(\d+)$/.exec(key)
           if (paletteMatch) {
-            const idx = parseInt(paletteMatch[1]!, 10)
+            const idx = parseInt(itemAt(paletteMatch, 1, "OSC 104 palette capture"), 10)
             if (idx < 0 || idx > 255) continue
             if (isQuery) {
               const c = palette256[idx]
@@ -3682,7 +3743,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             } else if (val === "") {
               // Reset: re-init from fresh palette
               const fresh = buildPalette256()
-              palette256[idx] = fresh[idx]!
+              palette256[idx] = itemAt(fresh, idx, "fresh ANSI palette")
             } else {
               const c = parseColorSpec(val)
               if (c) palette256[idx] = c
@@ -3748,7 +3809,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           const fresh = buildPalette256()
           for (const tok of value.split(";")) {
             const idx = parseInt(tok, 10)
-            if (!isNaN(idx) && idx >= 0 && idx < 256) palette256[idx] = fresh[idx]!
+            if (!isNaN(idx) && idx >= 0 && idx < 256) {
+              palette256[idx] = itemAt(fresh, idx, "fresh ANSI palette")
+            }
           }
         }
         break
@@ -3955,7 +4018,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     if (match) {
       hasSixel = true
       sixelImages.push({
-        data: match[2]!,
+        data: itemAt(match, 2, "sixel payload capture"),
         row: dcsStartRow,
         col: dcsStartCol,
       })
@@ -4158,8 +4221,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     apcOverflow = false
     utf8PendingBytes = []
     semanticZones = []
-    mainSoftWrapped = new Array(rows).fill(false)
-    altSoftWrapped = new Array(rows).fill(false)
+    mainSoftWrapped = new Array<boolean>(rows).fill(false)
+    altSoftWrapped = new Array<boolean>(rows).fill(false)
     softWrapped = mainSoftWrapped
     mainLineAttrs = new Array<number>(rows).fill(0)
     altLineAttrs = new Array<number>(rows).fill(0)
@@ -4312,7 +4375,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     const text = decodeInput(data)
 
     for (let i = 0; i < text.length; i++) {
-      const ch = text[i]!
+      // The loop bound proves this code-unit read; an assertion preserves the parser's zero-overhead flood path.
+      const ch = text[i] as string
       const code = text.charCodeAt(i)
 
       switch (parserState) {
@@ -4358,7 +4422,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
               const nextCode = text.charCodeAt(i + 1)
               if (nextCode >= 0xdc00 && nextCode <= 0xdfff) {
-                char = ch + text[i + 1]!
+                char = ch + (text[i + 1] as string)
                 i++
               }
             }
@@ -4506,7 +4570,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             const alignCell = emptyCell()
             alignCell.char = "E"
             for (let r = 0; r < rows; r++) {
-              const row = grid[r]!
+              const row = itemAt(grid, r, "selective erase rows")
               for (let c = 0; c < cols; c++) {
                 row.setCellRaw(c, alignCell)
               }
@@ -4744,11 +4808,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     let tracked: { row: number; col: number } | null = null
 
     for (let li = 0; li < logicalLines.length; li++) {
-      const line = logicalLines[li]!
+      const line = itemAt(logicalLines, li, "reflow logical lines")
       // Trim trailing empty cells from logical line
       let lineLen = line.length
       while (lineLen > 0) {
-        const cell = line[lineLen - 1]!
+        const cell = itemAt(line, lineLen - 1, "reflow logical-line cells")
         if (cell.char === "" && !cell.wide) {
           lineLen--
         } else {
@@ -4773,7 +4837,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         const row = makeRow(newCols)
         let col = 0
         while (col < newCols && pos < lineLen) {
-          const cell = line[pos]!
+          const cell = itemAt(line, pos, "reflow logical-line cells")
           if (cell.wide && col + 2 > newCols) {
             // Wide char doesn't fit — leave rest of row empty, wrap to next
             break
@@ -4826,7 +4890,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   }): void {
     const floor = result.tracked == null ? 1 : Math.max(1, result.tracked.row + 1)
     while (result.rows.length > floor) {
-      const lastRow = result.rows[result.rows.length - 1]!
+      const lastRow = itemAt(result.rows, result.rows.length - 1, "reflow result rows")
       const isEmpty = packedRowIsBlank(lastRow)
       if (isEmpty && !result.wrapped[result.rows.length - 2]) {
         // The row before wasn't soft-wrapped and this row is empty — trim it
@@ -4894,7 +4958,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       for (const wrapped of restoredWrapped) if (!wrapped) completed++
       if (cursorTrack.line === 0 && restoredWrapped[restoredWrapped.length - 1] === true) {
         for (let i = restoredWrapped.length - 1; i >= 0 && restoredWrapped[i]; i--) {
-          cursorTrack.offset += restoredRows[i]!.length
+          cursorTrack.offset += itemAt(restoredRows, i, "restored rows").length
         }
       }
       cursorTrack.line += completed
@@ -4918,7 +4982,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
     // Build new grids: if reflowed content fits, place at top; if it overflows, take the last newRows
     const newMain = makeGrid(newCols, newRows)
-    const newMainWrapped: boolean[] = new Array(newRows).fill(false)
+    const newMainWrapped = new Array<boolean>(newRows).fill(false)
     const newMainAttrs: number[] = new Array<number>(newRows).fill(0)
     const mainStartRow = Math.max(0, mainResult.rows.length - newRows)
     // Rows pushed off the TOP by a shrink are history, not waste. They were
@@ -4933,19 +4997,19 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       }
     }
     for (let r = 0; r < newRows && mainStartRow + r < mainResult.rows.length; r++) {
-      newMain[r] = mainResult.rows[mainStartRow + r]!
-      newMainWrapped[r] = mainResult.wrapped[mainStartRow + r]!
+      newMain[r] = itemAt(mainResult.rows, mainStartRow + r, "resized main rows")
+      newMainWrapped[r] = itemAt(mainResult.wrapped, mainStartRow + r, "resized main wrap flags")
       newMainAttrs[r] = mainLogicalAttrs[mainResult.lineIndex[mainStartRow + r] ?? 0] ?? 0
     }
 
     // Build new alt grid
     const newAlt = makeGrid(newCols, newRows)
-    const newAltWrapped: boolean[] = new Array(newRows).fill(false)
+    const newAltWrapped = new Array<boolean>(newRows).fill(false)
     const newAltAttrs: number[] = new Array<number>(newRows).fill(0)
     const altStartRow = Math.max(0, altResult.rows.length - newRows)
     for (let r = 0; r < newRows && altStartRow + r < altResult.rows.length; r++) {
-      newAlt[r] = altResult.rows[altStartRow + r]!
-      newAltWrapped[r] = altResult.wrapped[altStartRow + r]!
+      newAlt[r] = itemAt(altResult.rows, altStartRow + r, "resized alternate rows")
+      newAltWrapped[r] = itemAt(altResult.wrapped, altStartRow + r, "resized alternate wrap flags")
       newAltAttrs[r] = altLogicalAttrs[altResult.lineIndex[altStartRow + r] ?? 0] ?? 0
     }
 
@@ -5243,7 +5307,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   function getText(): string {
     const lines: string[] = []
     for (let r = 0; r < rows; r++) {
-      lines.push(rowToString(grid[r]!))
+      lines.push(rowToString(itemAt(grid, r, "screen text rows")))
     }
     return lines.join("\n")
   }
@@ -5276,7 +5340,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   function getRowAbsolute(row: number): ScreenCell[] {
     if (row < 0 || row >= scrollback.length + rows) return makeRow(cols).toCells()
-    const src = row < scrollback.length ? scrollback[row]! : grid[row - scrollback.length]!
+    const src =
+      row < scrollback.length
+        ? itemAt(scrollback, row, "scrollback rows")
+        : itemAt(grid, row - scrollback.length, "screen rows")
     return src.toCells().map(stripCellColorIndex)
   }
 
@@ -6063,7 +6130,7 @@ export function serializeSnapshot(snapshot: Snapshot, options: SerializeOptions 
     const wraps = snapshot.scrollbackSoftWrapped
     const last = snapshot.scrollback.length - 1
     for (let i = 0; i < snapshot.scrollback.length; i++) {
-      const row = snapshot.scrollback[i]!
+      const row = itemAt(snapshot.scrollback, i, "snapshot scrollback rows")
       if (wraps?.[i] === true && i < last) {
         out.push(serializeEncodeRow(row, hyperlinks, snapshot.cols), "\x1b[0m")
       } else {

@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write # npm Trusted Publishing (GitHub OIDC); no NPM_TOKEN secret is read (26540)
 
 jobs:
   release:
@@ -28,9 +29,12 @@ jobs:
           node-version: "23"
           registry-url: "https://registry.npmjs.org"
 
+      # npm Trusted Publishing needs npm >= 11.5.1 for the OIDC token exchange; Node 23 ships
+      # an older npm. pnpm publish hands the upload to this npm (26540).
+      - name: Upgrade npm for Trusted Publishing
+        run: npm install -g npm@^11.5.1 && npm --version
+
       - name: Build and publish packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           publish() {
             local dir=$1
