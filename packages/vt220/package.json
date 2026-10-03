@@ -38,6 +38,9 @@
       }
     }
   },
+  "scripts": {
+    "build": "tsdown"
+  },
   "tsdown": {
     "clean": true,
     "dts": true,
@@ -46,8 +49,5 @@
   },
   "engines": {
     "node": ">=23.6.0"
-  },
-  "scripts": {
-    "build": "tsdown"
   }
 }
