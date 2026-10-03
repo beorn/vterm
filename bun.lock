@@ -13,15 +13,15 @@
     },
     "packages/vt100": {
       "name": "vt100.js",
-      "version": "0.7.0",
+      "version": "0.7.1",
     },
     "packages/vt220": {
       "name": "vt220.js",
-      "version": "0.7.0",
+      "version": "0.7.1",
     },
     "packages/vterm": {
       "name": "vterm.js",
-      "version": "0.7.0",
+      "version": "0.7.1",
     },
   },
   "packages": {
