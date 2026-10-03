@@ -68,7 +68,7 @@ actually compiles each package's own sources.
 - Factory functions (`createVt100Screen`, `createVt220Screen`, `createVtermScreen`), no classes
 - Each emulator is a single self-contained file (`screen.ts`) with no internal module dependencies
 - Zero external dependencies — pure TypeScript
-- ESM only, `.ts` extensions in imports, published as raw TypeScript source
+- ESM only, `.ts` extensions in imports, published as built ESM (`./dist/index.mjs` and `./dist/index.d.mts`)
 - `engines.node >= 23.6.0` (native type stripping)
 
 ## Ecosystem
