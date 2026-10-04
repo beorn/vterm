@@ -47,6 +47,48 @@ function roundTrip(snapshot: Snapshot): Snapshot {
   return decoded
 }
 
+describe("snapshot-codec — independent icon label", () => {
+  // Optional v1 header state must preserve own absence rather than apply restore's fallback.
+  test("distinct, empty and legacy-absent labels round-trip without normalization", () => {
+    const screen = mkScreen(8, 2)
+    feed(screen, `${ESC}]2;window\x07${ESC}]1;icon\x07`)
+    const snapshot = screen.snapshot()
+    expect(Reflect.get(snapshot, "iconLabel")).toBe("icon")
+    expect(Reflect.get(roundTrip(snapshot), "iconLabel")).toBe("icon")
+    expect(encodeScreenSnapshotBinary(snapshot)[0]).toBe(1)
+    Reflect.set(snapshot, "iconLabel", "")
+    expect(Reflect.get(roundTrip(snapshot), "iconLabel")).toBe("")
+    Reflect.deleteProperty(snapshot, "iconLabel")
+    const decoded = roundTrip(snapshot)
+    expect(Object.hasOwn(decoded, "iconLabel")).toBe(false)
+    const restored = mkScreen(8, 2)
+    restored.restore(decoded)
+    expect(Reflect.get(restored.snapshot(), "iconLabel")).toBe("window")
+  })
+
+  test("encoder rejects own malformed iconLabel, including undefined", () => {
+    for (const invalid of [undefined, null, 1, {}, []]) {
+      const snapshot = mkScreen(8, 2).snapshot()
+      Reflect.set(snapshot, "iconLabel", invalid)
+      expect(() => encodeScreenSnapshotBinary(snapshot)).toThrow(/iconLabel/)
+    }
+  })
+
+  test("decoder rejects malformed supplied iconLabel in the v1 JSON header", () => {
+    const snapshot = mkScreen(8, 2).snapshot()
+    Reflect.set(snapshot, "iconLabel", "bad!")
+    const encoded = encodeScreenSnapshotBinary(snapshot)
+    const field = encoder.encode('"iconLabel":"bad!"')
+    const start = encoded.findIndex((_, index) => field.every((byte, offset) => encoded[index + offset] === byte))
+    expect(start).toBeGreaterThan(0)
+    for (const value of ["null  ", "123456", "{}    ", "[]    "]) {
+      const tampered = encoded.slice()
+      tampered.set(encoder.encode(`"iconLabel":${value}`), start)
+      expect(() => decodeScreenSnapshotBinary(tampered)).toThrow(/iconLabel/)
+    }
+  })
+})
+
 /**
  * A floor under `JSON.stringify(snapshot).length` — the naive keyed-JSON size the
  * binary codec exists to replace — computed without ever building that string.

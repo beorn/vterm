@@ -20,7 +20,7 @@ Part of the [vterm](https://github.com/beorn/vterm) monorepo.
 - **Synchronized output** — mode 2026
 - **Application cursor keys & keypad**
 - **Kitty keyboard protocol** — progressive-enhancement flags with a push/pop/set stack (`CSI u`)
-- **OSC sequences** — window title (OSC 0/2), hyperlinks (OSC 8), clipboard (OSC 52), colors
+- **OSC sequences** — independent icon/window labels (OSC 0 sets both, OSC 1 icon, OSC 2 window), hyperlinks (OSC 8), clipboard (OSC 52), colors
 - **DCS sequences** — consumed and ignored, XTVERSION response
 - **Device attributes** — DA1/DA2/DA3 responses
 - **Device status reports** — DSR responses
@@ -139,6 +139,8 @@ console.log(restored.getText()) // "Hello, Bold Green World!" — text and style
 **Phase order.** The emit stream is five ordered phases: **history** (scrollback flushed via CRLF, since CUP cannot address it) → **geometry** (`?1049h` alt-enter and the DECSTBM scroll region — both home the cursor) → **paint-safe modes** (DECSET set-forms only, mouse, kitty keyboard, palette/default colors, optional title) → **paint** (DECAWM off, `CSI H` home + `CSI 2J` clear, then positioned pen-diff rows) → **finalize** (autowrap, cursor shape, charset, insert, tab stops, DECSLRM, pending pen, visibility, cursor). Two constraints are load-bearing: **no geometry op may follow the cursor** (all homing must precede the paint), and the **cursor is restored last** — emitted region-relative (`?6h` origin then a margin-relative `CSI H`) when origin mode is set and the target lies inside the scroll region, absolute otherwise. `?2026` (synchronized output) and `?3` (DECCOLM) are never emitted — replaying either would wedge or wipe a live receiver.
 
 **Soft-wrap history.** `Snapshot` carries `scrollbackSoftWrapped: boolean[]` alongside `scrollback` — bit `i` true means scrollback row `i` wraps into row `i+1` (one logical line split across rows); an absent array (older stored v1 snapshots) is treated as all-false. Phase-1 history re-links a wrapped row by emitting it at full width with no line break, so the receiver's own autowrap re-records the bit as the row scrolls back.
+
+**Icon/window labels.** `Snapshot.title` remains the window title. New v1 snapshots include optional `iconLabel`, including empty strings; the binary codec preserves whether that field is present. Only `restore()` defaults legacy absence to `title` to preserve old CSI20 behavior; historical OSC0 versus OSC2 intent cannot be recovered. An own `undefined`, `null` or other non-string value is rejected. Older readers ignore the new JSON-header key and lose independent icon semantics. `getTitle()` and `title$` remain window-only. `includeTitle:true` emits a nonempty window title with OSC2, preserving the receiver's independent icon instead of the former OSC0 side effect. Default title omission and empty-title omission remain; ANSI replay does not transfer the icon label.
 
 ### Ops and taps
 
