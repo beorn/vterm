@@ -963,6 +963,43 @@ describe("mouse tracking modes", () => {
 // ═══════════════════════════════════════════════════════
 
 describe("OSC title", () => {
+  // Snapshots are durable state; previous title tests could not detect dropped independent labels.
+  test("JSON snapshots preserve distinct and empty icon labels, with legacy fallback only on restore", () => {
+    const source = screenWith("\x1b]2;window\x07\x1b]1;icon\x07", { cols: 8, rows: 2 })
+    const original = source.snapshot()
+    expect(Object.hasOwn(original, "iconLabel")).toBe(true)
+    expect(Reflect.get(original, "iconLabel")).toBe("icon")
+    const restored = createVtermScreen()
+    restored.restore(JSON.parse(JSON.stringify(original)) as Snapshot)
+    expect(restored.snapshot()).toEqual(original)
+    source.process(enc.encode("\x1b]1;\x07"))
+    const empty = source.snapshot()
+    expect(Reflect.get(empty, "iconLabel")).toBe("")
+    restored.restore(empty)
+    expect(Reflect.get(restored.snapshot(), "iconLabel")).toBe("")
+    const legacy = structuredClone(original)
+    Reflect.deleteProperty(legacy, "iconLabel")
+    const before = structuredClone(legacy)
+    restored.restore(legacy)
+    expect(Reflect.get(restored.snapshot(), "iconLabel")).toBe("window")
+    expect(legacy).toEqual(before)
+    restored.process(enc.encode("\x1b]2;changed-window\x07"))
+    expect(Reflect.get(restored.snapshot(), "iconLabel")).toBe("window")
+  })
+
+  test("own malformed iconLabel rejects atomically rather than using legacy fallback", () => {
+    const target = screenWith("target\x1b]0;target-label\x07", { cols: 8, rows: 2 })
+    const before = target.snapshot()
+    for (const invalid of [undefined, null, 1, {}, []]) {
+      const donor = screenWith("donor\x1b]2;donor-window\x07", { cols: 10, rows: 3 }).snapshot()
+      Reflect.set(donor, "iconLabel", invalid)
+      const inputBefore = structuredClone(donor)
+      expect(() => target.restore(donor)).toThrow("Invalid vterm snapshot iconLabel")
+      expect(target.snapshot()).toEqual(before)
+      expect(donor).toEqual(inputBefore)
+    }
+  })
+
   test("OSC 0 sets title (BEL)", () => {
     const screen = screenWith("\x1b]0;My Title\x07")
     expect(screen.getTitle()).toBe("My Title")
@@ -2320,6 +2357,7 @@ describe("snapshot / restore", () => {
       "cols",
       "cursor",
       "cwd",
+      "iconLabel",
       // Sparse DEC line attributes (DECDWL/DECDHL). Optional on the type and
       // absent from older snapshots, but always emitted by snapshot().
       "lineAttrs",

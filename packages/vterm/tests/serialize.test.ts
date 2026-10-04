@@ -509,6 +509,26 @@ describe("serializeSnapshot — pen goldens", () => {
     expect(without.getTitle()).toBe("")
   })
 
+  // includeTitle promises the window title, so replay must not overwrite the receiver icon.
+  test("includeTitle changes only the window title and retains empty-title omission", () => {
+    const source = mkScreen(20, 2)
+    feed(source, `${ESC}]0;source-title${ESC}\\${ESC}]1;source-icon\x07`)
+    for (const includeTitle of [true, false]) {
+      const sink = mkScreen(20, 2)
+      feed(sink, `${ESC}]0;receiver-title\x07${ESC}]1;receiver-icon\x07`)
+      const ansi = serializeSnapshot(source.snapshot(), { includeTitle })
+      feed(sink, ansi)
+      expect(sink.getTitle()).toBe(includeTitle ? "source-title" : "receiver-title")
+      expect(Reflect.get(sink.snapshot(), "iconLabel")).toBe("receiver-icon")
+      if (includeTitle) expect(ansi).toContain(`${ESC}]2;source-title${ESC}\\`)
+    }
+    const sink = mkScreen(20, 2)
+    feed(sink, `${ESC}]0;keep\x07`)
+    feed(sink, serializeSnapshot(mkScreen(20, 2).snapshot(), { includeTitle: true }))
+    expect(sink.getTitle()).toBe("keep")
+    expect(Reflect.get(sink.snapshot(), "iconLabel")).toBe("keep")
+  })
+
   test("screen.serialize() delegates to serializeSnapshot of the live snapshot", () => {
     const source = mkScreen(16, 2)
     feed(source, `${ESC}[1mhey`)

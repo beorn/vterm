@@ -271,6 +271,8 @@ export interface Snapshot {
   }
   tabStops: number[]
   title: string
+  /** Independent icon label. Legacy absence restores from title; a supplied value must be a string. */
+  iconLabel?: string
   clipboard: string
   cwd: string
   notifications: string[]
@@ -1233,6 +1235,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   // Terminal state
   let title = ""
+  let iconLabel = ""
   let useAltScreen = false
   let bracketedPaste = false
   let applicationCursor = false
@@ -1537,6 +1540,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     if (!Array.isArray(value.tabStops)) throw new TypeError("Invalid vterm snapshot tabStops")
     for (const stop of value.tabStops) assertInteger("tabStops", stop)
     assertString("title", value.title)
+    if (Object.hasOwn(value, "iconLabel")) assertString("iconLabel", value.iconLabel)
     assertString("clipboard", value.clipboard)
     assertString("cwd", value.cwd)
     if (!Array.isArray(value.notifications) || value.notifications.some((entry) => typeof entry !== "string")) {
@@ -2553,7 +2557,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         //   14 → text-area size in px (rows*cellH × cols*cellW with cellH=16, cellW=8)
         //   16 → cell size in px
         //   18 → text-area size in chars (rows × cols)
-        //   20 → icon label (as OSC L <title> ST — we reuse window title)
+        //   20 → icon label (as OSC L <icon label> ST)
         //   21 → window title (as OSC l <title> ST)
         const op = parts[0] ?? 0
         if (!onResponse) break
@@ -2570,7 +2574,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             onResponse(`\x1b[8;${rows};${cols}t`)
             break
           case 20:
-            onResponse(`\x1b]L${title}\x1b\\`)
+            onResponse(`\x1b]L${iconLabel}\x1b\\`)
             break
           case 21:
             onResponse(`\x1b]l${title}\x1b\\`)
@@ -3564,6 +3568,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
     switch (code) {
       case 0: // Set icon name and window title
+        iconLabel = value
+        title = value
+        break
       case 2: // Set window title
         title = value
         break
@@ -3586,7 +3593,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         }
         break
       }
-      case 1: // Set icon name (ignore)
+      case 1: // Set icon name
+        iconLabel = value
         break
       case 7: // Current working directory: OSC 7 ; file://host/path ST
         cwd = value
@@ -4152,6 +4160,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
     attrs = resetAttrs()
     title = ""
+    iconLabel = ""
     useAltScreen = false
     bracketedPaste = false
     applicationCursor = false
@@ -5134,6 +5143,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       },
       tabStops: [...tabStops].sort((a, b) => a - b),
       title,
+      iconLabel,
       clipboard,
       cwd,
       notifications: [...notifications],
@@ -5238,6 +5248,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     colorStack.push(...snapshotValue.colors.stack.map(cloneColorStateSnapshot))
     tabStops = new Set(snapshotValue.tabStops)
     title = snapshotValue.title
+    // assertSnapshot has rejected any own non-string value before mutation.
+    iconLabel = Object.hasOwn(snapshotValue, "iconLabel") ? (snapshotValue.iconLabel as string) : snapshotValue.title
     clipboard = snapshotValue.clipboard
     cwd = snapshotValue.cwd
     notifications = [...snapshotValue.notifications]
@@ -5761,7 +5773,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 export interface SerializeOptions {
   /** Emit scrollback history rows before the screen paint. Default: true. */
   includeScrollback?: boolean
-  /** Emit the window title (OSC 0) when non-empty. Default: false. */
+  /** Emit only the window title (OSC 2) when non-empty, preserving the receiver's icon label. Default: false. */
   includeTitle?: boolean
   /** Emit OSC 8 hyperlinks for cell and pending-pen urls. Default: true. */
   hyperlinks?: boolean
@@ -6188,7 +6200,7 @@ export function serializeSnapshot(snapshot: Snapshot, options: SerializeOptions 
     }
   }
   if (options.includeTitle === true && snapshot.title.length > 0) {
-    out.push(`\x1b]0;${snapshot.title}\x1b\\`)
+    out.push(`\x1b]2;${snapshot.title}\x1b\\`)
   }
 
   // Phase 4 — paint: DECAWM off (kills last-column/deferred-wrap artifacts),
