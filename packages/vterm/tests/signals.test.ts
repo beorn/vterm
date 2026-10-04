@@ -39,6 +39,24 @@ function feed(screen: VtermScreen, s: string): void {
 }
 
 describe("signals — change-only firing (equality gate)", () => {
+  // The viewport subscribes to window titles; independent icon writes must not notify it.
+  test("title$ remains window-only through icon writes, restore and reset", () => {
+    const s = mkScreen()
+    const seen: string[] = []
+    s.signals.title$.subscribe((t) => seen.push(t))
+    feed(s, "\x1b]2;window\x07\x1b]1;icon\x07")
+    expect(seen).toEqual(["window"])
+    expect(s.getTitle()).toBe("window")
+    expect(Reflect.get(s.snapshot(), "iconLabel")).toBe("icon")
+    const snapshot = s.snapshot()
+    Reflect.set(snapshot, "iconLabel", "restored-icon")
+    s.restore(snapshot)
+    expect(seen).toEqual(["window"])
+    feed(s, "\x1b]0;both\x07")
+    expect(seen).toEqual(["window", "both"])
+    s.reset()
+    expect(seen).toEqual(["window", "both", ""])
+  })
   test("title$ fires once on a real change and NOT on an equal value", () => {
     const s = mkScreen()
     const seen: string[] = []

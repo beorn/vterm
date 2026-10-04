@@ -14,7 +14,7 @@
  *   version          1 byte, value 1. An unknown value throws on decode (no fallback).
  *   header           varint length + that many UTF-8 bytes of JSON. Carries the small
  *                    scalar state — cols/rows/scrollbackLimit/activeBuffer, cursor,
- *                    savedState, attrs, modes, margins, colors, tabStops, title,
+ *                    savedState, attrs, modes, margins, colors, tabStops, title, iconLabel,
  *                    clipboard, cwd, notifications, viewportOffset, parser, unicode.
  *                    Everything that is neither a cell grid nor a soft-wrap array rides
  *                    here verbatim (it is small, and JSON round-trips it exactly).
@@ -119,6 +119,8 @@ interface SnapshotHeader {
   colors: Snapshot["colors"]
   tabStops: number[]
   title: string
+  /** Additive v1 JSON key; absence must remain absent until the screen restores it. */
+  iconLabel?: string
   clipboard: string
   cwd: string
   notifications: string[]
@@ -675,6 +677,9 @@ function readGridSection(
  * deterministic for identical input and decodes back to a deep-equal snapshot.
  */
 export function encodeScreenSnapshotBinary(snapshot: Snapshot): Uint8Array {
+  if (Object.hasOwn(snapshot, "iconLabel") && typeof snapshot.iconLabel !== "string") {
+    throw new TypeError("vterm snapshot codec: invalid iconLabel")
+  }
   const w = createWriter()
   w.u8(VERSION)
 
@@ -692,6 +697,7 @@ export function encodeScreenSnapshotBinary(snapshot: Snapshot): Uint8Array {
     colors: snapshot.colors,
     tabStops: snapshot.tabStops,
     title: snapshot.title,
+    ...(Object.hasOwn(snapshot, "iconLabel") ? { iconLabel: snapshot.iconLabel } : {}),
     clipboard: snapshot.clipboard,
     cwd: snapshot.cwd,
     notifications: snapshot.notifications,
@@ -736,6 +742,9 @@ export function decodeScreenSnapshotBinary(bytes: Uint8Array): Snapshot {
 
   const headerLen = r.varint()
   const header = JSON.parse(decoder.decode(r.take(headerLen))) as SnapshotHeader
+  if (Object.hasOwn(header, "iconLabel") && typeof header.iconLabel !== "string") {
+    throw new TypeError("vterm snapshot codec: invalid iconLabel")
+  }
 
   const strings = readStringTable(r)
   const colors = readColorTable(r)
@@ -767,6 +776,7 @@ export function decodeScreenSnapshotBinary(bytes: Uint8Array): Snapshot {
     colors: header.colors,
     tabStops: header.tabStops,
     title: header.title,
+    ...(Object.hasOwn(header, "iconLabel") ? { iconLabel: header.iconLabel } : {}),
     clipboard: header.clipboard,
     cwd: header.cwd,
     notifications: header.notifications,

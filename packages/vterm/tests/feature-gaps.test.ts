@@ -391,7 +391,35 @@ describe("XTWINOPS window reports", () => {
 
   test("CSI 20 t → icon label as OSC L", () => {
     const { responses, feed } = makeScreen()
-    feed("\x1b]2;hello\x07\x1b[20t")
+    feed("\x1b]1;hello\x07\x1b[20t")
     expect(responses[0]).toMatch(/^\x1b\]Lhello\x1b\\$/)
   })
+
+  // Independent setters and complete empty replies were missed by the title-only golden.
+  test.each(["\x07", "\x1b\\"])(
+    "icon/window setters stay independent with %j termination and fragmented frames",
+    (end) => {
+      const { screen, responses, feed } = makeScreen()
+      const report = () => {
+        responses.length = 0
+        feed("\x1b[20t\x1b[21t")
+        return [...responses]
+      }
+      expect(report()).toEqual(["\x1b]L\x1b\\", "\x1b]l\x1b\\"])
+      feed(`\x1b]2;window${end}`)
+      expect(report()).toEqual(["\x1b]L\x1b\\", "\x1b]lwindow\x1b\\"])
+      for (const char of `\x1b]1;icon${end}`) feed(char)
+      expect(report()).toEqual(["\x1b]Licon\x1b\\", "\x1b]lwindow\x1b\\"])
+      feed(`\x1b]0;both${end}`)
+      expect(report()).toEqual(["\x1b]Lboth\x1b\\", "\x1b]lboth\x1b\\"])
+      feed(`\x1b]1;${end}\x1b]2;next${end}`)
+      expect(report()).toEqual(["\x1b]L\x1b\\", "\x1b]lnext\x1b\\"])
+      feed(`\x1b]1;last-icon${end}\x1b]2;${end}`)
+      expect(report()).toEqual(["\x1b]Llast-icon\x1b\\", "\x1b]l\x1b\\"])
+      screen.reset()
+      expect(report()).toEqual(["\x1b]L\x1b\\", "\x1b]l\x1b\\"])
+      feed(`\x1b]0;clear-me${end}\x1bc`)
+      expect(report()).toEqual(["\x1b]L\x1b\\", "\x1b]l\x1b\\"])
+    },
+  )
 })
