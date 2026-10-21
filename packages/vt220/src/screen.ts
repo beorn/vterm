@@ -441,6 +441,10 @@ export function createScreen(opts: ScreenOptions): Screen {
   }
 
   function handleCSIPrivate(params: string, finalByte: string): void {
+    // An intermediate byte makes it another function: DECRQM "?1$p" is not DECRST "?1l". A VT220 has no DECRQM,
+    // so such a sequence is ignored rather than run as a mode reset.
+    if (!/^[0-9;]*$/.test(params)) return
+
     const parts = params.split(";").map((s) => (s === "" ? 0 : parseInt(s, 10)))
 
     if (finalByte === "J") {
@@ -453,6 +457,9 @@ export function createScreen(opts: ScreenOptions): Screen {
       handleSelectiveEraseLine(parts[0] ?? 0)
       return
     }
+    // Only DECSET/DECRST change a mode. Any other private final byte — XTSMGRAPHICS "?2;1;0S", the kitty
+    // keyboard query "?u" — is a function a VT220 does not have.
+    if (finalByte !== "h" && finalByte !== "l") return
 
     const set = finalByte === "h"
 

@@ -357,6 +357,11 @@ export function createScreen(opts: ScreenOptions): Screen {
   }
 
   function handleCSIPrivate(params: string, finalByte: string): void {
+    // Only DECSET/DECRST (final h or l, plain numeric parameters) change a mode. Any other private sequence —
+    // DECRQM "?1$p", XTSMGRAPHICS "?2;1;0S", the kitty keyboard query "?u" — is a function a VT100 does not
+    // have, so it is ignored rather than run as a mode reset.
+    if ((finalByte !== "h" && finalByte !== "l") || !/^[0-9;]*$/.test(params)) return
+
     const parts = params.split(";").map((s) => (s === "" ? 0 : parseInt(s, 10)))
     const set = finalByte === "h"
 

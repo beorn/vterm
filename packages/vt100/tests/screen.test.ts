@@ -1135,3 +1135,33 @@ describe("Vt100Screen", () => {
     })
   })
 })
+
+// A private CSI changes a mode only as DECSET/DECRST — final byte h or l, plain numeric parameters.
+// Every other private sequence is a function this engine does not have, so it is ignored, never run as a reset.
+describe("private CSI other than DECSET/DECRST changes no mode", () => {
+  const modes = [
+    { code: 1, name: "applicationCursor" },
+    { code: 5, name: "reverseVideo" },
+    { code: 6, name: "originMode" },
+    { code: 7, name: "autoWrap" },
+    { code: 25, name: "cursorVisible" },
+    { code: 66, name: "applicationKeypad" },
+  ]
+  const queries = [
+    { query: "DECRQM", sequence: (code: number) => `\x1b[?${code}$p` },
+    { query: "XTSMGRAPHICS", sequence: () => "\x1b[?2;1;0S" },
+    { query: "the kitty keyboard query", sequence: (code: number) => `\x1b[?${code}u` },
+    { query: "an l after an intermediate", sequence: (code: number) => `\x1b[?${code}$l` },
+  ]
+  const cases = modes.flatMap((mode) => queries.map((query) => ({ ...mode, ...query })))
+
+  test.each(cases)("$query after CSI ? $code h leaves $name set and sends no reply", ({ code, name, sequence }) => {
+    const onResponse = vi.fn()
+    const s = createScreen({ cols: 80, rows: 24, onResponse })
+    s.feed(new TextEncoder().encode(`\x1b[?${code}h`))
+    expect(s.getMode(name)).toBe(true)
+    s.feed(new TextEncoder().encode(sequence(code)))
+    expect(s.getMode(name)).toBe(true)
+    expect(onResponse).not.toHaveBeenCalled()
+  })
+})
