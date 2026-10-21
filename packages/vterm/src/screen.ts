@@ -1637,10 +1637,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // Text scale (OSC 66)
   let textScale = 1
 
-  // UI metric query state (OSC 7770/7777/776)
-  const CELL_W_PX = 8
-  const CELL_H_PX = 17
-  const FONT_ASCENT_PX = 14
+  // Settable font-size query state (OSC 7770/7777)
   let fontSize = 12
   let fontWindowSize = 12
 
@@ -2554,21 +2551,19 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       case "t": {
         // XTWINOPS — window manipulation / reports.
         // We implement the query variants (no real window to manipulate):
-        //   14 → text-area size in px (rows*cellH × cols*cellW with cellH=16, cellW=8)
-        //   16 → cell size in px
+        //   14 → text-area size in px (unknown: this engine has no physical window)
+        //   16 → cell size in px (unknown: this engine has no font)
         //   18 → text-area size in chars (rows × cols)
         //   20 → icon label (as OSC L <icon label> ST)
         //   21 → window title (as OSC l <title> ST)
         const op = parts[0] ?? 0
         if (!onResponse) break
-        const CELL_H = 16
-        const CELL_W = 8
         switch (op) {
           case 14:
-            onResponse(`\x1b[4;${rows * CELL_H};${cols * CELL_W}t`)
+            onResponse("\x1b[4;0;0t")
             break
           case 16:
-            onResponse(`\x1b[6;${CELL_H};${CELL_W}t`)
+            onResponse("\x1b[6;0;0t")
             break
           case 18:
             onResponse(`\x1b[8;${rows};${cols}t`)
@@ -3950,8 +3945,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         break
       }
       case 776:
-        // rxvt-unicode cell metrics: cell-width ; cell-height ; font-ascent.
-        if (onResponse) onResponse(`\x1b]776;${CELL_W_PX};${CELL_H_PX};${FONT_ASCENT_PX}\x1b\\`)
+        // rxvt-unicode cell metrics: width ; height ; ascent, all unknown without a font.
+        if (onResponse) onResponse("\x1b]776;0;0;0\x1b\\")
         break
       case 7770: {
         // mintty font size query/set. Query returns a restorable set sequence.
@@ -4006,8 +4001,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       case 1337: {
         // iTerm2 proprietary sequences
         if (value === "ReportCellSize" && onResponse) {
-          // Report default 8x16 pixel cell size (standard monospace ratio)
-          onResponse("\x1b]1337;ReportCellSize=16;8\x1b\\")
+          // Physical cell dimensions are unknown without a font.
+          onResponse("\x1b]1337;ReportCellSize=0;0\x1b\\")
         } else if (value === "RequestCapabilities" && onResponse) {
           // Report empty capabilities (protocol supported, no iTerm2-specific features)
           onResponse("\x1b]1337;Capabilities=\x1b\\")

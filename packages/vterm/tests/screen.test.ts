@@ -2241,12 +2241,23 @@ describe("OSC 701/702/776 — rxvt-unicode queries", () => {
     expect(responses[0]).toBe("\x1b]702;vterm.js;vterm;0;2\x1b\\")
   })
 
-  test("OSC 776 reports cell metrics", () => {
+  test("OSC 776 reports unknown cell metrics", () => {
     const responses: string[] = []
     const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
     screen.process(enc.encode("\x1b]776\x07"))
-    expect(responses[0]).toBe("\x1b]776;8;17;14\x1b\\")
+    expect(responses).toEqual(["\x1b]776;0;0;0\x1b\\"])
   })
+})
+
+// ═══════════════════════════════════════════════════════
+// OSC 1337 — iTerm2 cell size
+// ═══════════════════════════════════════════════════════
+
+test("OSC 1337 ReportCellSize reports unknown physical dimensions", () => {
+  const responses: string[] = []
+  const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+  screen.process(enc.encode("\x1b]1337;ReportCellSize\x07"))
+  expect(responses).toEqual(["\x1b]1337;ReportCellSize=0;0\x1b\\"])
 })
 
 // ═══════════════════════════════════════════════════════

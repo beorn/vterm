@@ -365,16 +365,19 @@ describe("new mode tracking", () => {
 // ── XTWINOPS window reports ──
 
 describe("XTWINOPS window reports", () => {
-  test("CSI 14 t → window pixel size", () => {
-    const { responses, feed } = makeScreen({ cols: 80, rows: 24 })
+  test("CSI 14 t → unknown window pixel size, including after resize", () => {
+    const { screen, responses, feed } = makeScreen({ cols: 80, rows: 24 })
     feed("\x1b[14t")
-    expect(responses[0]).toMatch(/^\x1b\[4;\d+;\d+t$/)
+    expect(responses).toEqual(["\x1b[4;0;0t"])
+    screen.resize(120, 40)
+    feed("\x1b[14t\x1b[18t")
+    expect(responses).toEqual(["\x1b[4;0;0t", "\x1b[4;0;0t", "\x1b[8;40;120t"])
   })
 
-  test("CSI 16 t → cell pixel size", () => {
+  test("CSI 16 t → unknown cell pixel size", () => {
     const { responses, feed } = makeScreen()
     feed("\x1b[16t")
-    expect(responses[0]).toBe("\x1b[6;16;8t")
+    expect(responses).toEqual(["\x1b[6;0;0t"])
   })
 
   test("CSI 18 t → text area in chars", () => {
