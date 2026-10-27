@@ -72,6 +72,21 @@ describe("Vt220Screen", () => {
     expect(text).toBeDefined()
   })
 
+  // A decoded supplementary scalar must not become two surrogate-half cells.
+  test.each([0, 1, 2, 3])("preserves a supplementary scalar with UTF-8 split at byte %i", (split) => {
+    const s = createScreen({ cols: 8, rows: 2 })
+    const bytes = new TextEncoder().encode("🌍")
+    if (split > 0) {
+      s.feed(bytes.subarray(0, split))
+      expect(s.getCursor().x).toBe(0)
+    }
+    s.feed(bytes.subarray(split))
+    s.feed(new TextEncoder().encode("X"))
+    expect(s.getCell(0, 0).char).toBe("🌍")
+    expect(s.getCell(0, 1).char).toBe("X")
+    expect(s.getCursor().x).toBe(2)
+  })
+
   // ── 8 standard colors (VT220 feature) ──
 
   test("feed ANSI color codes, getCell() has correct fg color", () => {

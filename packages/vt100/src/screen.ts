@@ -521,9 +521,8 @@ export function createScreen(opts: ScreenOptions): Screen {
   function process(data: Uint8Array): void {
     const text = decoder.decode(data, { stream: true })
 
-    for (let i = 0; i < text.length; i++) {
-      const ch = text[i]!
-      const code = text.charCodeAt(i)
+    for (const ch of text) {
+      const code = ch.charCodeAt(0)
 
       switch (parserState) {
         case "ground":
