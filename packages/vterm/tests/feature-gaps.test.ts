@@ -461,12 +461,12 @@ describe("XTWINOPS window reports", () => {
     feed("\x1b[23t")
     expect(report()).toEqual(["\x1b]Licon-a\x1b\\", "\x1b]ltitle-a\x1b\\"])
 
-    // Stack cap (10 entries): pushing 12 times retains the first 10 pushed entries
+    // Stack cap (10 entries, drop-oldest like xterm.js): pushing 12 times retains the newest 10 (stack-2..stack-11)
     for (let i = 0; i < 12; i++) {
       feed(`\x1b]2;stack-${i}\x07\x1b[22;2t`)
     }
     feed("\x1b]2;top\x07")
-    for (let i = 9; i >= 0; i--) {
+    for (let i = 11; i >= 2; i--) {
       feed("\x1b[23;2t")
       expect(screen.getTitle()).toBe(`stack-${i}`)
     }

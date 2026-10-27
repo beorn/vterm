@@ -278,7 +278,7 @@ export interface Snapshot {
   }
   tabStops: number[]
   title: string
-  /** Independent icon label. Legacy absence restores from title; a supplied value must be a string. */
+  /** Independent icon label. Legacy absence restores from title; a supplied value must be a string. XTWINOPS 22/23 title/icon stacks are deliberately not snapshotted (`restore()` clears them). */
   iconLabel?: string
   clipboard: string
   cwd: string
@@ -1242,6 +1242,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let attrs: Attrs = resetAttrs()
 
   // Terminal state
+  // Cap XTWINOPS 22/23 stacks at 10 entries, dropping the oldest on overflow (matches xterm.js).
   const TITLE_STACK_MAX = 10
   let title = ""
   let iconLabel = ""
@@ -2572,11 +2573,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         const op = parts[0] ?? 0
         if (op === 22) {
           const sel = parts[1] ?? 0
-          if ((sel === 0 || sel === 1) && iconLabelStack.length < TITLE_STACK_MAX) {
+          if (sel === 0 || sel === 1) {
             iconLabelStack.push(iconLabel)
+            if (iconLabelStack.length > TITLE_STACK_MAX) iconLabelStack.shift()
           }
-          if ((sel === 0 || sel === 2) && titleStack.length < TITLE_STACK_MAX) {
+          if (sel === 0 || sel === 2) {
             titleStack.push(title)
+            if (titleStack.length > TITLE_STACK_MAX) titleStack.shift()
           }
           break
         }
