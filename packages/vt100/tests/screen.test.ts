@@ -93,6 +93,9 @@ describe("Vt100Screen", () => {
       s.feed(encoder.encode("Z"))
       expect([s.getCell(0, 0).char, s.getCell(0, 1).char]).toEqual(["A", "Z"])
       expect(s.getCursor().x).toBe(2)
+      s.feed(encoder.encode(`\x1b${bank}\x1b[1mQ`))
+      expect(s.getCell(0, 2)).toMatchObject({ char: "Q", bold: true })
+      expect(s.getCursor().x).toBe(3)
     }
   })
 
