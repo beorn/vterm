@@ -553,9 +553,14 @@ export function createScreen(opts: ScreenOptions): Screen {
           break
 
         case "escape":
-          if (ch === "[") {
+          if (escBuf === "(" || escBuf === ")") {
+            escBuf = ""
+            parserState = ch === "\x1b" ? "escape" : "ground"
+          } else if (ch === "[") {
             parserState = "csi"
             escBuf = ""
+          } else if (ch === "(" || ch === ")") {
+            escBuf = ch
           } else if (ch === "]") {
             parserState = "osc"
             oscBuf = ""

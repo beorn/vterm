@@ -72,6 +72,25 @@ describe("Vt220Screen", () => {
     expect(text).toBeDefined()
   })
 
+  // Designation bytes are parser input even when charset translation is unavailable.
+  test.each(["(", ")"])("consumes ESC %s charset designations across chunks", (bank) => {
+    for (const designation of ["0", "B"]) {
+      const s = createScreen({ cols: 8, rows: 2 })
+      const encoder = new TextEncoder()
+      s.feed(encoder.encode("A"))
+      s.feed(encoder.encode(`\x1b${bank}`))
+      expect(s.getCursor().x).toBe(1)
+      s.feed(encoder.encode(designation))
+      expect(s.getCursor().x).toBe(1)
+      s.feed(encoder.encode("Z"))
+      expect([s.getCell(0, 0).char, s.getCell(0, 1).char]).toEqual(["A", "Z"])
+      expect(s.getCursor().x).toBe(2)
+      s.feed(encoder.encode(`\x1b${bank}\x1b[1mQ`))
+      expect(s.getCell(0, 2)).toMatchObject({ char: "Q", bold: true })
+      expect(s.getCursor().x).toBe(3)
+    }
+  })
+
   // A decoded supplementary scalar must not become two surrogate-half cells.
   test.each([0, 1, 2, 3])("preserves a supplementary scalar with UTF-8 split at byte %i", (split) => {
     const s = createScreen({ cols: 8, rows: 2 })
@@ -549,6 +568,18 @@ describe("snapshot / restore (vt220 subset)", () => {
     }
     expect(restored.getText()).toBe(original.getText())
     expect(restored.getCursorPosition()).toEqual(original.getCursorPosition())
+
+    for (const bank of ["(", ")"]) {
+      const pending = createVt220Screen({ cols: 20, rows: 4 })
+      feedStr(pending, `A\x1b${bank}`)
+      const continued = createVt220Screen({ cols: 20, rows: 4 })
+      continued.restore(pending.snapshot())
+      for (const screen of [pending, continued]) {
+        feedStr(screen, "0Z")
+        expect([screen.getCell(0, 0).char, screen.getCell(0, 1).char]).toEqual(["A", "Z"])
+        expect(screen.getCursorPosition()).toEqual({ x: 2, y: 0 })
+      }
+    }
   })
 
   test("snapshot schema stays locked to the VT220 subset", () => {
