@@ -1242,8 +1242,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let attrs: Attrs = resetAttrs()
 
   // Terminal state
+  const TITLE_STACK_MAX = 10
   let title = ""
   let iconLabel = ""
+  const titleStack: string[] = []
+  const iconLabelStack: string[] = []
   let useAltScreen = false
   let bracketedPaste = false
   let applicationCursor = false
@@ -2558,13 +2561,37 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       }
       case "t": {
         // XTWINOPS — window manipulation / reports.
-        // We implement the query variants (no real window to manipulate):
+        // We implement the query variants and the title/icon-label stack:
         //   14 → text-area size in px (unknown: this engine has no physical window)
         //   16 → cell size in px (unknown: this engine has no font)
         //   18 → text-area size in chars (rows × cols)
         //   20 → icon label (as OSC L <icon label> ST)
         //   21 → window title (as OSC l <title> ST)
+        //   22 → push icon label (1), window title (2), or both (0/omitted)
+        //   23 → pop icon label (1), window title (2), or both (0/omitted)
         const op = parts[0] ?? 0
+        if (op === 22) {
+          const sel = parts[1] ?? 0
+          if ((sel === 0 || sel === 1) && iconLabelStack.length < TITLE_STACK_MAX) {
+            iconLabelStack.push(iconLabel)
+          }
+          if ((sel === 0 || sel === 2) && titleStack.length < TITLE_STACK_MAX) {
+            titleStack.push(title)
+          }
+          break
+        }
+        if (op === 23) {
+          const sel = parts[1] ?? 0
+          if (sel === 0 || sel === 1) {
+            const popped = iconLabelStack.pop()
+            if (popped !== undefined) iconLabel = popped
+          }
+          if (sel === 0 || sel === 2) {
+            const popped = titleStack.pop()
+            if (popped !== undefined) title = popped
+          }
+          break
+        }
         if (!onResponse) break
         switch (op) {
           case 14:
@@ -4169,6 +4196,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     attrs = resetAttrs()
     title = ""
     iconLabel = ""
+    titleStack.length = 0
+    iconLabelStack.length = 0
     useAltScreen = false
     bracketedPaste = false
     applicationCursor = false
@@ -5257,6 +5286,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     title = snapshotValue.title
     // assertSnapshot has rejected any own non-string value before mutation.
     iconLabel = Object.hasOwn(snapshotValue, "iconLabel") ? (snapshotValue.iconLabel as string) : snapshotValue.title
+    titleStack.length = 0
+    iconLabelStack.length = 0
     clipboard = snapshotValue.clipboard
     cwd = snapshotValue.cwd
     notifications = [...snapshotValue.notifications]
