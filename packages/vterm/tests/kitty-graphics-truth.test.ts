@@ -93,4 +93,20 @@ describe("#31020 kitty graphics capability truth (CTO 5e61a05d, Option A)", () =
     screen.process(enc.encode(TRANSFER))
     expect(screen.snapshot().modes.kittyGraphics).toBe(false)
   })
+
+  test("default: q=1 suppresses only OK, so the refusal still answers", () => {
+    const { screen, out } = makeScreen()
+    screen.process(enc.encode(QUERY_QUIET_OK))
+    expect(out.response).toBe("\x1b_Gi=42;ENOTSUP\x1b\\")
+  })
+
+  test("restoring a snapshot that claims the capability cannot enable a default screen", () => {
+    const { screen: source } = makeScreen({ kittyGraphicsImages: true })
+    const legacy = JSON.parse(JSON.stringify(source.snapshot())) as ReturnType<typeof source.snapshot>
+    legacy.modes.kittyGraphics = true
+    const { screen } = makeScreen()
+    screen.restore(legacy)
+    expect(screen.getMode("kittyGraphics")).toBe(false)
+    expect(screen.snapshot().modes.kittyGraphics).toBe(false)
+  })
 })

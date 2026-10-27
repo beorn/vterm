@@ -90,6 +90,13 @@ export interface ScreenOptions {
   cols?: number
   rows?: number
   scrollbackLimit?: number
+  /**
+   * The embedder renders or relays kitty graphics images, so this screen may
+   * claim them: graphics queries answer OK and the kittyGraphics mode is true.
+   * Default false — this screen stores no image, so it refuses queries and
+   * reports no capability (#31020).
+   */
+  kittyGraphicsImages?: boolean
   /** Callback for DA1/DA2/DSR responses — write these back to the PTY */
   onResponse?: (data: string) => void
   /**
@@ -1186,6 +1193,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let rows = options.rows ?? 24
   let scrollbackLimit = options.scrollbackLimit ?? 1000
   const onResponse = options.onResponse
+  const kittyGraphicsImages = options.kittyGraphicsImages ?? false
   const maxStringSequenceLength = options.maxStringSequenceLength ?? DEFAULT_MAX_STRING_SEQUENCE_LENGTH
   if (!Number.isSafeInteger(maxStringSequenceLength) || maxStringSequenceLength < 0) {
     throw new RangeError("maxStringSequenceLength must be a non-negative safe integer")
@@ -1261,12 +1269,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let kittyKeyboardStack: number[] = []
 
   // Kitty graphics protocol
-  // Headless design: we parse the APC G protocol and respond to queries so that
-  // applications relying on the query→response handshake work correctly. We don't
-  // store image data because there's no pixel framebuffer — unlike sixel where we
-  // preserve the raw data for consumers, kitty graphics payloads are chunked and
-  // stateful, making storage without rendering impractical.
-  let hasKittyGraphics = false
+  // Headless design: we parse the APC G protocol and answer queries truthfully.
+  // We don't store image data because there's no pixel framebuffer — unlike sixel
+  // where we preserve the raw data for consumers, kitty graphics payloads are
+  // chunked and stateful, making storage without rendering impractical. The
+  // kittyGraphics mode is the declared kittyGraphicsImages capability, never a
+  // latch set by a crossed payload (#31020).
 
   // Scroll region (inclusive, 0-based)
   let scrollTop = 0
@@ -4065,8 +4073,6 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   function handleAPC(data: string): void {
     if (!data.startsWith("G")) return
 
-    hasKittyGraphics = true
-
     // Parse key=value pairs
     const semicolonIdx = data.indexOf(";")
     const kvPart = semicolonIdx >= 0 ? data.substring(1, semicolonIdx) : data.substring(1)
@@ -4079,10 +4085,17 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       }
     }
 
-    // Handle query action
+    // Handle query action. q=1 suppresses the OK acknowledgement only;
+    // q=2 suppresses errors too (kitty quiet rules).
     if (params.a === "q" && onResponse) {
-      // Respond: OK
-      onResponse(`\x1b_Gi=${params.i ?? "0"};OK\x1b\\`)
+      if (kittyGraphicsImages) {
+        if (params.q !== "1" && params.q !== "2") onResponse(`\x1b_Gi=${params.i ?? "0"};OK\x1b\\`)
+      } else if (params.q !== "2") {
+        // The protocol page names no unsupported code (measured 2026-10-27: 0 ENOTSUP,
+        // 0 ENOSYS, 4 EINVAL); ENOTSUP is the conventional errno-style name, not protocol
+        // text, and EINVAL is refused by name because the query is well formed.
+        onResponse(`\x1b_Gi=${params.i ?? "0"};ENOTSUP\x1b\\`)
+      }
     }
   }
 
@@ -4172,7 +4185,6 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     syncOutput = false
     kittyKeyboardFlags = 0
     kittyKeyboardStack = []
-    hasKittyGraphics = false
     hasSixel = false
     sixelImages = []
     scrollTop = 0
@@ -5119,7 +5131,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         syncOutput,
         kittyKeyboardFlags,
         kittyKeyboardStack: [...kittyKeyboardStack],
-        kittyGraphics: hasKittyGraphics,
+        kittyGraphics: kittyGraphicsImages,
         colorSchemeReporting,
         decColumn: decColumnMode,
         altScroll: altScrollMode,
@@ -5227,7 +5239,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     syncOutput = snapshotValue.modes.syncOutput
     kittyKeyboardFlags = snapshotValue.modes.kittyKeyboardFlags
     kittyKeyboardStack = [...snapshotValue.modes.kittyKeyboardStack]
-    hasKittyGraphics = snapshotValue.modes.kittyGraphics
+    // kittyGraphics stays the constructor's declared capability; a snapshot never invents one.
     colorSchemeReporting = snapshotValue.modes.colorSchemeReporting
     decColumnMode = snapshotValue.modes.decColumn
     altScrollMode = snapshotValue.modes.altScroll
@@ -5459,7 +5471,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       case "kittyKeyboard":
         return kittyKeyboardFlags > 0
       case "kittyGraphics":
-        return hasKittyGraphics
+        return kittyGraphicsImages
       case "sixel":
         return hasSixel
       default:
@@ -5564,7 +5576,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       leftRightMargin: leftRightMarginMode,
       colorSchemeReporting,
       kittyKeyboard: kittyKeyboardFlags > 0,
-      kittyGraphics: hasKittyGraphics,
+      kittyGraphics: kittyGraphicsImages,
       sixel: hasSixel,
     }
   }

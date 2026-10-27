@@ -1657,8 +1657,11 @@ describe("kitty keyboard protocol", () => {
 })
 
 describe("kitty graphics protocol", () => {
+  // #31020: kittyGraphics is the declared kittyGraphicsImages capability, so the
+  // pre-existing positive cases construct opted-in screens; default behaviour is
+  // covered by kitty-graphics-truth.test.ts.
   test("accepts kitty graphics APC sequence", () => {
-    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    const screen = createVtermScreen({ cols: 80, rows: 24, kittyGraphicsImages: true })
     // Minimal kitty graphics: transmit a 1x1 red pixel
     screen.process(enc.encode("\x1b_Gf=32,s=1,v=1,a=T;/w==\x1b\\"))
     expect(screen.getMode("kittyGraphics")).toBe(true)
@@ -1669,6 +1672,7 @@ describe("kitty graphics protocol", () => {
     const screen = createVtermScreen({
       cols: 80,
       rows: 24,
+      kittyGraphicsImages: true,
       onResponse: (d) => {
         response += d
       },
@@ -1684,7 +1688,7 @@ describe("kitty graphics protocol", () => {
   })
 
   test("BEL-terminated kitty graphics", () => {
-    const screen = createVtermScreen({ cols: 80, rows: 24 })
+    const screen = createVtermScreen({ cols: 80, rows: 24, kittyGraphicsImages: true })
     screen.process(enc.encode("\x1b_Gf=32,a=T;data\x07"))
     expect(screen.getMode("kittyGraphics")).toBe(true)
   })
@@ -1694,6 +1698,7 @@ describe("kitty graphics protocol", () => {
     const screen = createVtermScreen({
       cols: 80,
       rows: 24,
+      kittyGraphicsImages: true,
       onResponse: (d) => {
         response += d
       },
@@ -1702,12 +1707,14 @@ describe("kitty graphics protocol", () => {
     expect(response).toBe("\x1b_Gi=42;OK\x1b\\")
   })
 
-  test("reset clears kitty graphics flag", () => {
-    const screen = createVtermScreen({ cols: 80, rows: 24 })
+  // Was "reset clears kitty graphics flag": the flag is now the declared
+  // capability, so a reset preserves it instead of clearing a payload latch.
+  test("reset keeps the declared kitty graphics capability", () => {
+    const screen = createVtermScreen({ cols: 80, rows: 24, kittyGraphicsImages: true })
     screen.process(enc.encode("\x1b_Gf=32,a=T;data\x1b\\"))
     expect(screen.getMode("kittyGraphics")).toBe(true)
     screen.reset()
-    expect(screen.getMode("kittyGraphics")).toBe(false)
+    expect(screen.getMode("kittyGraphics")).toBe(true)
   })
 
   test("non-graphics APC is ignored", () => {
