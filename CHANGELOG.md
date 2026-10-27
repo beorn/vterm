@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.0
+
+- Save and restore window titles and icon labels with XTWINOPS 22/23, including the `iconLabel` exposed by snapshots. Reset clears both stacks.
+- Keep the ten most recent saved titles and icon labels, discarding the oldest entry when a stack reaches its cap to match xterm.js.
+- vt100.js and vt220.js are unchanged; their versions advance with the shared release.
+
 ## 0.8.0
 
 - Refuse Kitty graphics queries with `ENOTSUP` by default. The `kittyGraphics` mode now reports the embedder's declared image-rendering capability.
