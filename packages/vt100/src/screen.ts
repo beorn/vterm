@@ -142,7 +142,7 @@ export function createScreen(opts: ScreenOptions): Screen {
   let viewportOffset = 0
 
   // Parser state
-  let parserState: "ground" | "escape" | "charset" | "csi" | "osc" | "dcs" | "oscString" = "ground"
+  let parserState: "ground" | "escape" | "csi" | "osc" | "dcs" | "oscString" = "ground"
   let escBuf = ""
   let oscBuf = ""
 
@@ -553,11 +553,14 @@ export function createScreen(opts: ScreenOptions): Screen {
           break
 
         case "escape":
-          if (ch === "[") {
+          if (escBuf === "(" || escBuf === ")") {
+            escBuf = ""
+            parserState = ch === "\x1b" ? "escape" : "ground"
+          } else if (ch === "[") {
             parserState = "csi"
             escBuf = ""
           } else if (ch === "(" || ch === ")") {
-            parserState = "charset"
+            escBuf = ch
           } else if (ch === "]") {
             parserState = "osc"
             oscBuf = ""
@@ -627,10 +630,6 @@ export function createScreen(opts: ScreenOptions): Screen {
             // Unknown escape — return to ground
             parserState = "ground"
           }
-          break
-
-        case "charset":
-          parserState = ch === "\x1b" ? "escape" : "ground"
           break
 
         case "csi":

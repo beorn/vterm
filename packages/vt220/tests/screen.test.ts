@@ -568,6 +568,18 @@ describe("snapshot / restore (vt220 subset)", () => {
     }
     expect(restored.getText()).toBe(original.getText())
     expect(restored.getCursorPosition()).toEqual(original.getCursorPosition())
+
+    for (const bank of ["(", ")"]) {
+      const pending = createVt220Screen({ cols: 20, rows: 4 })
+      feedStr(pending, `A\x1b${bank}`)
+      const continued = createVt220Screen({ cols: 20, rows: 4 })
+      continued.restore(pending.snapshot())
+      for (const screen of [pending, continued]) {
+        feedStr(screen, "0Z")
+        expect([screen.getCell(0, 0).char, screen.getCell(0, 1).char]).toEqual(["A", "Z"])
+        expect(screen.getCursorPosition()).toEqual({ x: 2, y: 0 })
+      }
+    }
   })
 
   test("snapshot schema stays locked to the VT220 subset", () => {
