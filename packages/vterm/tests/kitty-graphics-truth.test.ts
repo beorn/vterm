@@ -18,6 +18,14 @@
  *
  * Test-first half: these fail on 1280244 and pass once the option lands.
  * vterm source is untouched by this file.
+ *
+ * @failure  A headless screen claims kitty graphics support it cannot render:
+ *           a query answers OK or the mode/snapshot reports a crossed payload
+ *           as capability, so guests send images into a pane that drops them.
+ * @level    l0
+ * @consumer #31020 — createVtermScreen kittyGraphicsImages option and the
+ *           kittyGraphics mode readouts hosts negotiate capability from
+ * @testonly none
  */
 import { describe, test, expect } from "vitest"
 import { createVtermScreen } from "../src/index.ts"
