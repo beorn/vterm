@@ -425,4 +425,57 @@ describe("XTWINOPS window reports", () => {
       expect(report()).toEqual(["\x1b]L\x1b\\", "\x1b]l\x1b\\"])
     },
   )
+
+  test("CSI 22 t and CSI 23 t push and pop icon label and window title stacks independently", () => {
+    const { screen, responses, feed } = makeScreen()
+    const report = () => {
+      responses.length = 0
+      feed("\x1b[20t\x1b[21t")
+      return [...responses]
+    }
+
+    // Set distinct initial icon label and window title
+    feed("\x1b]1;icon-a\x07\x1b]2;title-a\x07")
+    expect(screen.getTitle()).toBe("title-a")
+    expect(report()).toEqual(["\x1b]Licon-a\x1b\\", "\x1b]ltitle-a\x1b\\"])
+
+    // Push both via CSI 22;0t, overwrite both, then pop window-only (CSI 23;2t) and icon-only (CSI 23;1t)
+    feed("\x1b[22;0t\x1b]1;icon-b\x07\x1b]2;title-b\x07")
+    expect(screen.getTitle()).toBe("title-b")
+    expect(report()).toEqual(["\x1b]Licon-b\x1b\\", "\x1b]ltitle-b\x1b\\"])
+
+    feed("\x1b[23;2t")
+    expect(screen.getTitle()).toBe("title-a")
+    expect(report()).toEqual(["\x1b]Licon-b\x1b\\", "\x1b]ltitle-a\x1b\\"])
+
+    feed("\x1b[23;1t")
+    expect(report()).toEqual(["\x1b]Licon-a\x1b\\", "\x1b]ltitle-a\x1b\\"])
+
+    // Empty stack pop is a no-op (leaves current values intact)
+    feed("\x1b[23t")
+    expect(report()).toEqual(["\x1b]Licon-a\x1b\\", "\x1b]ltitle-a\x1b\\"])
+
+    // Selector-specific pushes (CSI 22;1t and CSI 22;2t) and default pop (CSI 23t pops both)
+    feed("\x1b[22;1t\x1b]1;icon-c\x07\x1b[22;2t\x1b]2;title-c\x07")
+    expect(report()).toEqual(["\x1b]Licon-c\x1b\\", "\x1b]ltitle-c\x1b\\"])
+    feed("\x1b[23t")
+    expect(report()).toEqual(["\x1b]Licon-a\x1b\\", "\x1b]ltitle-a\x1b\\"])
+
+    // Stack cap (10 entries, drop-oldest like xterm.js): pushing 12 times retains the newest 10 (stack-2..stack-11)
+    for (let i = 0; i < 12; i++) {
+      feed(`\x1b]2;stack-${i}\x07\x1b[22;2t`)
+    }
+    feed("\x1b]2;top\x07")
+    for (let i = 11; i >= 2; i--) {
+      feed("\x1b[23;2t")
+      expect(screen.getTitle()).toBe(`stack-${i}`)
+    }
+    // 11th pop is a no-op because stack was capped at 10
+    feed("\x1b]2;after-empty\x07\x1b[23;2t")
+    expect(screen.getTitle()).toBe("after-empty")
+
+    // RIS (ESC c) and reset() clear the stacks
+    feed("\x1b]0;saved\x07\x1b[22t\x1bc\x1b[23t")
+    expect(report()).toEqual(["\x1b]L\x1b\\", "\x1b]l\x1b\\"])
+  })
 })
