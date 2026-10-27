@@ -2,17 +2,18 @@
  * Regression tests for #31020 — a headless vterm screen must not tell a guest it
  * can show kitty graphics it will never paint.
  *
- * Ruling: @cto 5e61a05d (Option A). Today `handleAPC` answers every
- * `a=q` query with `\x1b_Gi=<id>;OK\x1b\` (screen.ts:4085) while the screen
- * stores no image at all (screen.ts:1263-1269), and `hasKittyGraphics` flips
- * true for ANY graphics APC (screen.ts:4064), so `getMode("kittyGraphics")`,
- * `modesNow()` (:5567) and the parser-state snapshot (:5122) all report a
- * capability the screen does not have. Silvery's runtime probe reads exactly
- * `OK` as support, so a deck pane is told the wrong thing.
+ * Ruling: @cto 5e61a05d (Option A). Before this change `handleAPC` answered
+ * every `a=q` query with `\x1b_Gi=<id>;OK\x1b\` while the screen stored no
+ * image at all, and `hasKittyGraphics` flipped true for ANY graphics APC, so
+ * `getMode("kittyGraphics")`, `modesNow()` and the parser-state snapshot all
+ * reported a capability the screen did not have. Silvery's runtime probe reads
+ * exactly `OK` as support, so a deck pane was told the wrong thing.
  *
  * Option A: unless the embedder passes `ScreenOptions.kittyGraphicsImages`,
- * a query is answered with the kitty protocol's unsupported-action error, and
- * the capability mode stays false; opting in restores the `OK` reply and a true
+ * a query is answered with an explicit ENOTSUP refusal — a conventional
+ * errno-style name the response format permits, not protocol text (the protocol
+ * page names no unsupported code; @cto bba689b8) — and the capability mode
+ * stays false; opting in restores the `OK` reply and a true
  * mode. The capability flag means "this screen can show graphics" and is set
  * from the declared option only.
  *
@@ -56,7 +57,7 @@ const QUERY_QUIET_OK = "\x1b_Gi=42,a=q,q=1;\x1b\\"
 const TRANSFER = "\x1b_Gf=32,s=1,v=1;AAAA\x1b\\"
 
 describe("#31020 kitty graphics capability truth (CTO 5e61a05d, Option A)", () => {
-  test("default: a graphics query is refused with the protocol's unsupported error, never OK", () => {
+  test("default: a graphics query is refused with an explicit ENOTSUP, never OK", () => {
     const { screen, out } = makeScreen()
     screen.process(enc.encode(QUERY))
     expect(out.response).toBe("\x1b_Gi=42;ENOTSUP\x1b\\")
