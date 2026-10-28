@@ -610,7 +610,8 @@ export function createScreen(opts: ScreenOptions): Screen {
   // ── SGR (Select Graphic Rendition) ──
 
   function handleSGR(rawParams: string): void {
-    const params = rawParams.split(";").map((s) => (s === "" ? 0 : parseInt(s, 10)))
+    // Colon groups are unsupported as a whole; NaN follows the existing unknown-code path.
+    const params = rawParams.split(";").map((s) => (s.includes(":") ? Number.NaN : s === "" ? 0 : parseInt(s, 10)))
 
     if (params.length === 0 || (params.length === 1 && params[0] === 0)) {
       attrs = resetAttrs()

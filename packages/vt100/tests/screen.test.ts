@@ -179,6 +179,29 @@ describe("Vt100Screen", () => {
     s.feed(new TextEncoder().encode("\x1b[4munderlined\x1b[0m"))
     const cell = s.getCell(0, 0)
     expect(cell.underline).toBe(true)
+
+    // Classic tiers ignore compound SGR groups, preserving state and valid siblings.
+    for (const initialUnderline of [false, true]) {
+      for (const params of ["4:0", "4:1", "4:2", "4:3", "4:4", "4:5", "38:2::1:2:3"]) {
+        s.reset()
+        s.feed(new TextEncoder().encode(`${initialUnderline ? "\x1b[4m" : ""}\x1b[${params}mX`))
+        expect(s.getCell(0, 0).underline, `${params}, initial=${initialUnderline}`).toBe(initialUnderline)
+      }
+    }
+    for (const [params, underline, bold] of [
+      ["1;4:3;31", false, true],
+      ["4:3;1", false, true],
+      ["4;4:3", true, false],
+      ["4;4:3;24", false, false],
+      ["4;0", false, false],
+      ["4;", false, false],
+      ["1;38:2::1:2:3;4", true, true],
+      ["38;2;1;2;3;4", true, false],
+    ] as const) {
+      s.reset()
+      s.feed(new TextEncoder().encode(`\x1b[${params}mX`))
+      expect(s.getCell(0, 0)).toMatchObject({ char: "X", underline, bold, fg: null })
+    }
   })
 
   test("SGR 24 turns off underline", () => {

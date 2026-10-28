@@ -194,6 +194,29 @@ describe("Vt220Screen", () => {
     const s = createScreen({ cols: 80, rows: 24 })
     s.feed(new TextEncoder().encode("\x1b[4mU\x1b[0m"))
     expect(s.getCell(0, 0).underline).toBe(true)
+
+    // Classic tiers ignore compound SGR groups, preserving state and valid siblings.
+    for (const initialUnderline of [false, true]) {
+      for (const params of ["4:0", "4:1", "4:2", "4:3", "4:4", "4:5", "38:2::1:2:3"]) {
+        s.reset()
+        s.feed(new TextEncoder().encode(`${initialUnderline ? "\x1b[4m" : ""}\x1b[${params}mX`))
+        expect(s.getCell(0, 0).underline, `${params}, initial=${initialUnderline}`).toBe(initialUnderline)
+      }
+    }
+    for (const [params, underline, bold, fg] of [
+      ["1;4:3;31", false, true, { r: 0x80, g: 0, b: 0 }],
+      ["4:3;1", false, true, null],
+      ["4;4:3", true, false, null],
+      ["4;4:3;24", false, false, null],
+      ["4;0", false, false, null],
+      ["4;", false, false, null],
+      ["1;38:2::1:2:3;4", true, true, null],
+      ["38;2;1;2;3;4", true, false, null],
+    ] as const) {
+      s.reset()
+      s.feed(new TextEncoder().encode(`\x1b[${params}mX`))
+      expect(s.getCell(0, 0)).toMatchObject({ char: "X", underline, bold, fg })
+    }
   })
 
   test("blink attribute", () => {
