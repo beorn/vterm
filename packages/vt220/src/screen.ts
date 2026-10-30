@@ -241,6 +241,7 @@ export function createScreen(opts: ScreenOptions): Screen {
       if (scrollback.length > scrollbackLimit * 2) {
         scrollback.splice(0, scrollback.length - scrollbackLimit)
       }
+      if (viewportOffset > 0) viewportOffset = Math.min(viewportOffset + 1, scrollback.length)
     }
     // Shift rows up within the region
     for (let i = top; i < bottom; i++) {

@@ -886,6 +886,32 @@ describe("Vt100Screen", () => {
   // ── scrollViewport() ──
 
   describe("scrollViewport", () => {
+    // @failure Output moves a scrolled-up reader to another row. @level l0 @consumer Termless viewport
+    test.each([false, true])("holds the viewed row during output (sync=%s)", (sync) => {
+      for (const offset of [0, 1]) {
+        const screen = createVt100Screen({ cols: 64, rows: 24, scrollbackLimit: 100 })
+        const enc = new TextEncoder()
+        screen.process(enc.encode(Array.from({ length: 48 }, (_, i) => `ROW-${i}`).join("\r\n")))
+        screen.scrollViewport(offset)
+        expect(screen.getScrollbackLength()).toBe(24)
+        expect(screen.getViewportOffset()).toBe(offset)
+
+        screen.process(enc.encode(`${sync ? "\x1b[?2026h" : ""}\r\nROW-48${sync ? "\x1b[?2026l" : ""}`))
+
+        expect(screen.getScrollbackLength()).toBe(25)
+        expect(screen.getViewportOffset()).toBe(offset === 0 ? 0 : 2)
+        const top = screen.getScrollbackLength() - screen.getViewportOffset()
+        expect(top).toBe(offset === 0 ? 25 : 23)
+        const cells = offset === 0 ? screen.getLine(0) : screen.getScrollbackLine(top)
+        expect(
+          cells
+            ?.map((cell) => cell.char)
+            .join("")
+            .trimEnd(),
+        ).toBe(offset === 0 ? "ROW-25" : "ROW-23")
+      }
+    })
+
     test("scrollViewport changes viewportOffset after scrollback exists", () => {
       const s = createScreen({ cols: 10, rows: 3 })
 

@@ -2053,6 +2053,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       if (enteredScrollback) {
         const banked = grid[0]
         const over = banked === undefined ? 0 : bankScrollbackRow(banked, softWrapped[0] ?? false, lineAttrs[0] ?? 0)
+        if (banked !== undefined && viewportOffset > 0) {
+          viewportOffset = Math.min(viewportOffset + 1, scrollback.length)
+        }
         markAbsoluteRowDirty(scrollback.length - 1 + over)
         if (over > 0) {
           // Absolute indices shift down by `over`; rebase accumulated damage and record the trim.

@@ -1255,6 +1255,53 @@ describe("wide characters", () => {
 // ═══════════════════════════════════════════════════════
 
 describe("scrollback", () => {
+  // @failure Output moves a scrolled-up reader to another row. @level l0 @consumer Termless viewport
+  test.each([false, true])("holds the viewed row during output (sync=%s)", (sync) => {
+    for (const offset of [0, 1]) {
+      const screen = createVtermScreen({ cols: 64, rows: 24, scrollbackLimit: 100 })
+      screen.process(enc.encode(Array.from({ length: 48 }, (_, i) => `ROW-${i}`).join("\r\n")))
+      screen.scrollViewport(offset)
+      expect(screen.getScrollbackLength()).toBe(24)
+      expect(screen.getViewportOffset()).toBe(offset)
+
+      screen.process(enc.encode(`${sync ? "\x1b[?2026h" : ""}\r\nROW-48${sync ? "\x1b[?2026l" : ""}`))
+
+      expect(screen.getScrollbackLength()).toBe(25)
+      expect(screen.getViewportOffset()).toBe(offset === 0 ? 0 : 2)
+      const top = screen.viewportTop()
+      expect(top).toBe(offset === 0 ? 25 : 23)
+      expect(
+        screen
+          .getRowAbsolute(top)
+          .map((cell) => cell.char)
+          .join("")
+          .trimEnd(),
+      ).toBe(offset === 0 ? "ROW-25" : "ROW-23")
+    }
+  })
+
+  // @failure Bulk eviction loses a surviving anchor or leaves a negative viewport top. @level l0 @consumer viewport
+  test.each([0, 1, 4])("retains a valid anchor through bulk eviction (offset=%s)", (offset) => {
+    const screen = createVtermScreen({ cols: 24, rows: 3, scrollbackLimit: 2 })
+    screen.process(enc.encode(Array.from({ length: 7 }, (_, i) => `ROW-${i}`).join("\r\n")))
+    screen.scrollViewport(offset)
+    expect(screen.getScrollbackLength()).toBe(4)
+    expect(screen.getViewportOffset()).toBe(offset)
+
+    screen.process(enc.encode("\r\nROW-7"))
+
+    expect(screen.getScrollbackLength()).toBe(2)
+    expect(screen.getViewportOffset()).toBe(offset === 0 ? 0 : 2)
+    expect(screen.viewportTop()).toBe(offset === 0 ? 2 : 0)
+    expect(
+      screen
+        .getRowAbsolute(screen.viewportTop())
+        .map((cell) => cell.char)
+        .join("")
+        .trimEnd(),
+    ).toBe(offset === 0 ? "ROW-5" : "ROW-3")
+  })
+
   test("lines scroll into scrollback", () => {
     const screen = createVtermScreen({ cols: 10, rows: 3, scrollbackLimit: 100 })
     screen.process(enc.encode("line1\r\nline2\r\nline3\r\nline4"))
