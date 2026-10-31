@@ -576,7 +576,7 @@ export interface Screen {
   getCursorBlinking(): boolean
 
   getTitle(): string
-  getMode(mode: string): boolean
+  getMode(mode: string): boolean | null
   getClipboard(): string
   getCwd(): string
   getNotifications(): string[]
@@ -5469,7 +5469,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     return parts.join("\n")
   }
 
-  function getMode(mode: string): boolean {
+  function getMode(mode: string): boolean | null {
     switch (mode) {
       case "altScreen":
         return useAltScreen
@@ -5512,7 +5512,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       case "sixel":
         return hasSixel
       default:
-        return false
+        return null
     }
   }
 

@@ -15,7 +15,7 @@ function createScreen(opts: {
   getLine: (row: number) => ReturnType<Vt100Screen["getLine"]>
   getLines: () => ReturnType<Vt100Screen["getLine"]>[]
   getCursor: () => { x: number; y: number; visible: boolean; style: string }
-  getMode: (mode: string) => boolean
+  getMode: (mode: string) => boolean | null
   getTitle: () => string
   getTextRange: (sr: number, sc: number, er: number, ec: number) => string
   getScrollback: () => { viewportOffset: number; totalLines: number; screenLines: number }
@@ -320,10 +320,10 @@ describe("Vt100Screen", () => {
 
   test("insertMode is NOT available (VT100 has no IRM)", () => {
     const s = createScreen({ cols: 80, rows: 24 })
-    expect(s.getMode("insertMode")).toBe(false)
+    expect(s.getMode("insertMode")).toBeNull()
     // CSI 4h is VT102/VT220 — VT100 ignores it
     s.feed(new TextEncoder().encode("\x1b[4h"))
-    expect(s.getMode("insertMode")).toBe(false)
+    expect(s.getMode("insertMode")).toBeNull()
   })
 
   test("reverse video mode (DECSCNM)", () => {
@@ -1247,4 +1247,23 @@ describe("private CSI other than DECSET/DECRST changes no mode", () => {
     expect(s.getMode(name)).toBe(true)
     expect(onResponse).not.toHaveBeenCalled()
   })
+})
+
+// @failure An untracked mode is fabricated as reset, or tracked state stops following set/reset.
+// @level l0
+// @consumer Terminal mode readers, including Termless and Terminfo.
+test("mode readback distinguishes tracked set/reset from an untracked mode", () => {
+  const screen = createVt100Screen({ cols: 20, rows: 4 })
+  const encoder = new TextEncoder()
+  const modes = [
+    ["applicationCursor", 1],
+    ["autoWrap", 7],
+  ] as const
+  for (const [name, number] of modes) {
+    screen.process(encoder.encode(`\x1b[?${number}h`))
+    expect(screen.getMode(name), `${name} set`).toBe(true)
+    screen.process(encoder.encode(`\x1b[?${number}l`))
+    expect(screen.getMode(name), `${name} reset`).toBe(false)
+  }
+  expect(screen.getMode("untracked-mode")).toBeNull()
 })

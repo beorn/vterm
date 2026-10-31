@@ -2703,3 +2703,24 @@ describe("resize exchanges rows with scrollback", () => {
     expect(screen.getScrollbackLength()).toBe(banked)
   })
 })
+
+// @failure An untracked mode is fabricated as reset, or tracked state stops following set/reset.
+// @level l0
+// @consumer Terminal mode readers, including Termless and Terminfo.
+test("mode readback distinguishes tracked set/reset from an untracked mode", () => {
+  const screen = createVtermScreen({ cols: 20, rows: 4 })
+  const encoder = new TextEncoder()
+  const modes = [
+    ["applicationCursor", 1],
+    ["autoWrap", 7],
+    ["sgrMouse", 1006],
+    ["leftRightMargin", 69],
+  ] as const
+  for (const [name, number] of modes) {
+    screen.process(encoder.encode(`\x1b[?${number}h`))
+    expect(screen.getMode(name), `${name} set`).toBe(true)
+    screen.process(encoder.encode(`\x1b[?${number}l`))
+    expect(screen.getMode(name), `${name} reset`).toBe(false)
+  }
+  expect(screen.getMode("untracked-mode")).toBeNull()
+})

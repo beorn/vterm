@@ -84,7 +84,7 @@ export interface Screen {
   getCursorPosition(): { x: number; y: number }
   getCursorVisible(): boolean
   getTitle(): string
-  getMode(mode: string): boolean
+  getMode(mode: string): boolean | null
   getScrollbackLength(): number
   getViewportOffset(): number
   scrollViewport(delta: number): void
@@ -805,7 +805,7 @@ export function createScreen(opts: ScreenOptions): Screen {
     return parts.join("\n")
   }
 
-  function getMode(mode: string): boolean {
+  function getMode(mode: string): boolean | null {
     switch (mode) {
       case "cursorVisible":
         return curVisible
@@ -820,7 +820,7 @@ export function createScreen(opts: ScreenOptions): Screen {
       case "reverseVideo":
         return reverseVideo
       default:
-        return false
+        return null
     }
   }
 
