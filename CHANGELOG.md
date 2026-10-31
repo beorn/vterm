@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.0
+
+- Breaking: getMode returns null for modes the engine does not track; was false. Callers must handle the nullable return in vt100.js, vt220.js and vterm.js.
+- Keep viewed scrollback rows anchored while new output adds history in all three engines.
+- Ignore unsupported colon SGR groups as a whole in vt100.js and vt220.js, preserving existing attributes.
+
 ## 0.9.0
 
 - Save and restore window titles and icon labels with XTWINOPS 22/23, including the `iconLabel` exposed by snapshots. Reset clears both stacks.
