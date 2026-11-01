@@ -1,5 +1,5 @@
 import { describe, test, expect, vi } from "vitest"
-import { createVt220Screen, type Vt220Screen } from "../src/index.ts"
+import { createVt220Screen, type Vt220Screen, type Vt220ScreenSnapshot } from "../src/index.ts"
 
 /** Helper: create a screen and return it with convenience methods. */
 function createScreen(opts: {
@@ -261,7 +261,7 @@ describe("Vt220Screen", () => {
         new TextEncoder().encode(`\x1b]2;prior\x07\x1b]2;abandoned\x1b[\x1b${intro}body${pendingEscape ? "\x1b" : ""}`),
       )
       const restored = createVt220Screen({ cols: 80, rows: 2 })
-      restored.restore(JSON.parse(JSON.stringify(s.snapshot())))
+      restored.restore(JSON.parse(JSON.stringify(s.snapshot())) as Vt220ScreenSnapshot)
       restored.process(new TextEncoder().encode(`${pendingEscape ? "" : "\x1b"}\\Y`))
       expect(restored.getTitle(), `pendingEscape=${pendingEscape}`).toBe("prior")
       expect(restored.getText().trim(), `pendingEscape=${pendingEscape}`).toBe("Y")
