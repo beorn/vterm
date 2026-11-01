@@ -162,6 +162,50 @@ describe("Vt100Screen", () => {
 
   // ── Text attributes (VT100 subset) ──
 
+  // Unsupported underline colours must consume operands without executing them as SGR codes.
+  test.each([
+    ["58;5;1", false, false, false],
+    ["58;2;1;2;3", false, false, false],
+    ["58;5;1;25", false, false, false],
+    ["1;58;5;5;4", true, false, true],
+    ["58;5;1;1;5;4", true, true, true],
+    ["1;4;5;59", true, true, true],
+  ] as const)("isolates unsupported SGR operands in %s", (params, bold, blink, underline) => {
+    const s = createScreen({ cols: 80, rows: 2 })
+    s.feed(new TextEncoder().encode(`\x1b[${params}mX`))
+    expect(s.getCell(0, 0)).toMatchObject({ char: "X", bold, blink, underline, fg: null, bg: null })
+  })
+
+  // The parser owns opaque-string isolation; every byte boundary can be a process() boundary.
+  test.each(["P", "_", "^", "X"])("discards ESC %s payload through ST across writes", (intro) => {
+    const input = `\x1b${intro}payload\x07body\x1b\\Y`
+    const bytes = new TextEncoder().encode(input)
+    for (let split = 0; split <= bytes.length; split++) {
+      const s = createScreen({ cols: 80, rows: 2 })
+      s.feed(bytes.slice(0, split))
+      s.feed(bytes.slice(split))
+      expect(s.getText().trim(), `split=${split}`).toBe("Y")
+    }
+  })
+
+  test.each(["P", "_", "^", "X"])("ESC ends discarded ESC %s and starts a normal escape", (intro) => {
+    const s = createScreen({ cols: 80, rows: 2 })
+    s.feed(new TextEncoder().encode(`\x1b${intro}discard\x1b[1mY`))
+    expect(s.getText().trim()).toBe("Y")
+    expect(s.getCell(0, 0).bold).toBe(true)
+  })
+
+  test("DCS termination cannot apply an abandoned OSC title", () => {
+    const bytes = new TextEncoder().encode("\x1b]2;prior\x07\x1b]2;abandoned\x1b[\x1bPq\x1b\\Y")
+    for (let split = 0; split <= bytes.length; split++) {
+      const s = createScreen({ cols: 80, rows: 2 })
+      s.feed(bytes.slice(0, split))
+      s.feed(bytes.slice(split))
+      expect(s.getTitle(), `split=${split}`).toBe("prior")
+      expect(s.getText().trim(), `split=${split}`).toBe("Y")
+    }
+  })
+
   test("feed bold text, getCell() has bold=true", () => {
     const s = createScreen({ cols: 80, rows: 24 })
     s.feed(new TextEncoder().encode("\x1b[1mhello\x1b[0m"))

@@ -486,6 +486,7 @@ export function createScreen(opts: ScreenOptions): Screen {
         // Skip extended color sequences to consume params correctly
         case 38:
         case 48:
+        case 58:
           if (i + 1 < params.length && params[i + 1] === 2) {
             i += 4 // skip 38;2;R;G;B or 48;2;R;G;B
           } else if (i + 1 < params.length && params[i + 1] === 5) {
@@ -566,7 +567,7 @@ export function createScreen(opts: ScreenOptions): Screen {
           } else if (ch === "]") {
             parserState = "osc"
             oscBuf = ""
-          } else if (ch === "P") {
+          } else if (ch === "P" || ch === "_" || ch === "^" || ch === "X") {
             parserState = "dcs"
             escBuf = ""
           } else if (ch === "c") {
@@ -678,9 +679,10 @@ export function createScreen(opts: ScreenOptions): Screen {
           break
 
         case "dcs":
-          // Consume until ST
+          // ESC ends an opaque control string and starts a normal escape (including ST).
           if (code === 0x1b) {
-            parserState = "oscString" // Reuse ST detection
+            parserState = "escape"
+            escBuf = ""
           }
           break
       }
