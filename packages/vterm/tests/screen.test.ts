@@ -2715,6 +2715,7 @@ test("mode readback distinguishes tracked set/reset from an untracked mode", () 
     ["autoWrap", 7],
     ["sgrMouse", 1006],
     ["leftRightMargin", 69],
+    ["altScroll", 1007],
   ] as const
   for (const [name, number] of modes) {
     screen.process(encoder.encode(`\x1b[?${number}h`))

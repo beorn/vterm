@@ -5495,6 +5495,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         return newLineMode
       case "reverseVideo":
         return reverseVideo
+      case "altScroll":
+        return altScrollMode
       case "syncOutput":
         return syncOutput
       case "sgrMouse":

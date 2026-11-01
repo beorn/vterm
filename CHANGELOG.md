@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.1
+
+- Expose vterm.js alternate-scroll mode through getMode("altScroll"), following the engine's existing DECSET/DECRST 1007 state.
+- vt100.js and vt220.js are unchanged; their versions advance with the shared release.
+
 ## 0.10.0
 
 - Breaking: getMode returns null for modes the engine does not track; was false. Callers must handle the nullable return in vt100.js, vt220.js and vterm.js.
