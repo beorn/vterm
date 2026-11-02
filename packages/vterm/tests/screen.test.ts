@@ -818,13 +818,10 @@ describe("DEC Special Graphics character set", () => {
 
 describe("DECSTR (soft terminal reset)", () => {
   test("resets insert mode", () => {
-    const screen = screenWith("\x1b[4h") // Set insert mode (via non-DEC)
-    // Actually, insert mode via DEC private:
-    const screen2 = screenWith("\x1b[?4h")
-    expect(screen2.getMode("insertMode")).toBe(true)
-    screen2.process(enc.encode("\x1b[!p"))
-    expect(screen2.getMode("insertMode")).toBe(false)
-    void screen
+    const screen = screenWith("\x1b[4h") // ANSI IRM
+    expect(screen.getMode("insertMode")).toBe(true)
+    screen.process(enc.encode("\x1b[!p"))
+    expect(screen.getMode("insertMode")).toBe(false)
   })
 
   test("resets origin mode", () => {
@@ -1389,10 +1386,43 @@ describe("RIS (ESC c)", () => {
 // ═══════════════════════════════════════════════════════
 
 describe("insert mode", () => {
+  // @failure DEC private ?4 changes ANSI IRM; existing insert tests exercise ANSI 4 only.
+  // @level l0
+  // @consumer Applications using insert/replace mode independently of DECSCLM.
+  test("DEC private 4 set/reset leaves ANSI insert mode independent", () => {
+    const screen = createVtermScreen({ cols: 10, rows: 3 })
+    screen.process(enc.encode("1234\x1b[?4h\x1b[1;1HAB"))
+    expect(screen.getMode("insertMode")).toBe(false)
+    expect(
+      screen
+        .getRow(0)
+        .slice(0, 4)
+        .map((cell) => cell.char)
+        .join(""),
+    ).toBe("AB34")
+
+    screen.process(enc.encode("\x1b[4h"))
+    for (const sequence of ["\x1b[?4h", "\x1b[?4l"]) {
+      screen.process(enc.encode(sequence))
+      expect(screen.getMode("insertMode")).toBe(true)
+    }
+  })
+
+  // @failure DECRQM ?4 reports ANSI IRM instead of the unsupported DECSCLM mode.
+  // @level l0
+  // @consumer Terminal applications querying DEC private mode support.
+  test.each([false, true])("DEC private 4 query is unrecognized with ANSI insert mode %s", (insert) => {
+    const replies: string[] = []
+    const screen = createVtermScreen({ onResponse: (reply) => replies.push(reply) })
+    if (insert) screen.process(enc.encode("\x1b[4h"))
+    screen.process(enc.encode("\x1b[?4$p"))
+    expect(replies).toEqual(["\x1b[?4;0$y"])
+  })
+
   test("insert mode shifts characters right", () => {
     const screen = createVtermScreen({ cols: 10, rows: 3 })
     screen.process(enc.encode("1234"))
-    screen.process(enc.encode("\x1b[?4h")) // Enable insert mode
+    screen.process(enc.encode("\x1b[4h")) // Enable ANSI insert mode
     screen.process(enc.encode("\x1b[1;1H")) // Go to start
     screen.process(enc.encode("AB"))
     expect(screen.getCell(0, 0).char).toBe("A")

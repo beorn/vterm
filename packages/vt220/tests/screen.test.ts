@@ -284,6 +284,22 @@ describe("Vt220Screen", () => {
     expect(s.getMode("insertMode")).toBe(false)
   })
 
+  // @failure DEC private ?4 changes ANSI IRM; the ANSI-only insert test cannot catch it.
+  // @level l0
+  // @consumer Applications using insert/replace mode independently of DECSCLM.
+  test("DEC private 4 set/reset leaves ANSI insert mode independent", () => {
+    const screen = createVt220Screen({ cols: 10, rows: 3 })
+    screen.process(new TextEncoder().encode("1234\x1b[?4h\x1b[1;1HAB"))
+    expect(screen.getMode("insertMode")).toBe(false)
+    expect([0, 1, 2, 3].map((col) => screen.getCell(0, col).char).join("")).toBe("AB34")
+
+    screen.process(new TextEncoder().encode("\x1b[4h"))
+    for (const sequence of ["\x1b[?4h", "\x1b[?4l"]) {
+      screen.process(new TextEncoder().encode(sequence))
+      expect(screen.getMode("insertMode")).toBe(true)
+    }
+  })
+
   // ── Insert/delete characters — VT220 features ──
 
   describe("insert/delete characters", () => {
@@ -702,7 +718,8 @@ describe("private CSI other than DECSET/DECRST changes no mode", () => {
   test.each(cases)("$query after CSI ? $code h leaves $name set and sends no reply", ({ code, name, sequence }) => {
     const onResponse = vi.fn()
     const s = createScreen({ cols: 80, rows: 24, onResponse })
-    s.feed(new TextEncoder().encode(`\x1b[?${code}h`))
+    // IRM is ANSI 4; private ?4 remains the query under test, never its setup.
+    s.feed(new TextEncoder().encode(code === 4 ? "\x1b[4h" : `\x1b[?${code}h`))
     expect(s.getMode(name)).toBe(true)
     s.feed(new TextEncoder().encode(sequence(code)))
     expect(s.getMode(name)).toBe(true)
