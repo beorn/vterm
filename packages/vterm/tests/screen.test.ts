@@ -2321,6 +2321,14 @@ test("OSC 1337 ReportCellSize reports unknown physical dimensions", () => {
   expect(responses).toEqual(["\x1b]1337;ReportCellSize=0;0\x1b\\"])
 })
 
+// The feature-reporting spec and real probe use Capabilities; cell-size queries miss this dispatch branch.
+test("OSC 1337 Capabilities answers the official feature-reporting request", () => {
+  const responses: string[] = []
+  const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+  screen.process(enc.encode("\x1b]1337;Capabilities\x1b\\"))
+  expect(responses).toEqual(["\x1b]1337;Capabilities=\x1b\\"])
+})
+
 // ═══════════════════════════════════════════════════════
 // OSC 5522 — Advanced Clipboard (Kitty protocol)
 // ═══════════════════════════════════════════════════════

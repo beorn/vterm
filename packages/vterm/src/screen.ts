@@ -4041,7 +4041,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         if (value === "ReportCellSize" && onResponse) {
           // Physical cell dimensions are unknown without a font.
           onResponse("\x1b]1337;ReportCellSize=0;0\x1b\\")
-        } else if (value === "RequestCapabilities" && onResponse) {
+        } else if (value === "Capabilities" && onResponse) {
           // Report empty capabilities (protocol supported, no iTerm2-specific features)
           onResponse("\x1b]1337;Capabilities=\x1b\\")
         }
