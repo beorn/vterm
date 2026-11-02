@@ -4420,6 +4420,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // ── Main parser ──
 
   function process(data: Uint8Array): void {
+    if (typeof data === "string") {
+      throw new TypeError("vterm.process expects Uint8Array; use apply({ type: 'output', data }) for strings")
+    }
     const text = decodeInput(data)
 
     for (let i = 0; i < text.length; i++) {

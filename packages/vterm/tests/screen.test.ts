@@ -63,6 +63,13 @@ describe("§9 naming ruling", () => {
 // ═══════════════════════════════════════════════════════
 
 describe("vterm screen", () => {
+  /** @failure Untyped callers silently lose string input. @level l1 @consumer VtermScreen.process */
+  test("process rejects string input with a named error", () => {
+    const screen = createVtermScreen()
+    // @ts-expect-error — JavaScript callers can pass strings despite the byte-only signature.
+    expect(() => screen.process("X")).toThrow(TypeError)
+  })
+
   test("creates with default dimensions", () => {
     const screen = createVtermScreen()
     expect(screen.cols).toBe(80)
