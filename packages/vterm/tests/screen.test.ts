@@ -140,9 +140,16 @@ describe("text writing", () => {
     expect(screen.getCursor()).toEqual({ col: 1, row: 0 })
   })
 
-  test("tab advances to next tab stop", () => {
+  test("tab advances to the next stop or the right margin after all stops are cleared", () => {
     const screen = screenWith("a\t")
     expect(screen.getCursor().col).toBe(8)
+    screen.process(enc.encode("\t"))
+    expect(screen.getCursor().col).toBe(16)
+    screen.process(enc.encode("\t"))
+    expect(screen.getCursor().col).toBe(24)
+    // TBC removes destinations, but HT still advances to the right margin.
+    screen.process(enc.encode("\x1b[3g\x1b[1;1H\t"))
+    expect(screen.getCursor()).toEqual({ col: 79, row: 0 })
   })
 
   test("autowrap wraps at end of line", () => {

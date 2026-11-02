@@ -1632,10 +1632,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     for (let i = x + 1; i < cols; i++) {
       if (tabStops.has(i)) return i
     }
-    // No stop ahead: xterm jumps to last column only if any stops exist
-    // beyond the current position; when the whole tab table is cleared
-    // (CSI 3 g), TAB should not move at all.
-    if (tabStops.size === 0) return x
+    // With no stop ahead, advance to the right margin even if the table is empty.
     return cols - 1
   }
 
