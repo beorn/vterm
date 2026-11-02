@@ -2876,9 +2876,6 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           case 5:
             value = reverseVideo ? 1 : 2
             break
-          case 4:
-            value = insertMode ? 1 : 2
-            break
           case 20:
             value = newLineMode ? 1 : 2
             break
@@ -2934,9 +2931,6 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       switch (code) {
         case 1: // DECCKM - Application Cursor
           applicationCursor = set
-          break
-        case 4: // IRM - Insert Mode (via DEC private)
-          insertMode = set
           break
         case 5: // DECSCNM - Reverse Video
           reverseVideo = set

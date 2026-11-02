@@ -12,9 +12,9 @@ Part of the [vterm](https://github.com/beorn/vterm) monorepo.
 - **Cursor shapes** — block, underline, bar with blinking variants (DECSCUSR)
 - **Cursor control** — CUP, CUU/CUD/CUF/CUB, CHA, CNL, CPL, HVP, save/restore (DECSC/DECRC)
 - **Erase operations** — ED 0/1/2/3, EL 0/1/2, ECH
-- **Editing operations** — ICH, DCH, IL, DL, REP (repeat last character)
+- **Editing operations** — ICH, DCH, IL, DL, REP (repeat last character), IRM (ANSI mode 4)
 - **Scroll regions** — DECSTBM, SU, SD with content preservation
-- **DEC private modes** — alternate screen, auto-wrap, origin, insert, reverse video, bracketed paste
+- **DEC private modes** — alternate screen, auto-wrap, origin, reverse video, bracketed paste; DECSCLM (?4) is not implemented and its set/reset is ignored
 - **Mouse tracking** — X10, normal, button, any-event, SGR format
 - **Focus tracking** — mode 1004
 - **Synchronized output** — mode 2026
