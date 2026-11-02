@@ -178,11 +178,11 @@ describe("tab stops", () => {
     expect(screen.getCursor().col).toBe(5)
   })
 
-  test("TBC 3 clears all stops → TAB does not move", () => {
+  test("TBC 3 clears all stops → TAB reaches the right margin", () => {
     const { screen, feed } = makeScreen()
     feed("\x1b[3g") // clear all
     feed("\t")
-    expect(screen.getCursor().col).toBe(0)
+    expect(screen.getCursor().col).toBe(79)
   })
 
   test("CHT advances by N stops", () => {
