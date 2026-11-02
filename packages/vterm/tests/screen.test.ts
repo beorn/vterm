@@ -948,6 +948,31 @@ describe("SGR mouse mode (1006)", () => {
 // ═══════════════════════════════════════════════════════
 
 describe("mouse tracking modes", () => {
+  // @failure Selecting or resetting a mouse encoding overwrites the active tracking protocol.
+  // @level l0
+  // @consumer Mouse adapters reading engine mode state and applications querying independent DEC modes.
+  test.each([1015, 1016])("encoding %s preserves tracking and independent mode replies", (encoding) => {
+    const replies: string[] = []
+    const screen = createVtermScreen({ onResponse: (reply) => replies.push(reply) })
+    screen.process(enc.encode(`\x1b[?1002h\x1b[?${encoding}h`))
+    expect(screen.snapshot().modes.mouseTrackingMode).toBe(1002)
+    screen.process(enc.encode(`\x1b[?1000$p\x1b[?1002$p\x1b[?${encoding}$p`))
+    expect(replies).toEqual(["\x1b[?1000;2$y", "\x1b[?1002;1$y", `\x1b[?${encoding};1$y`])
+    const restored = createVtermScreen()
+    restored.restore(screen.snapshot())
+    expect(restored.signals.modes$.get()).toMatchObject({
+      mouseTrackingMode: 1002,
+      urxvtMouse: encoding === 1015,
+      pixelMouse: encoding === 1016,
+    })
+    restored.reset()
+    expect(restored.signals.modes$.get()).toMatchObject({ urxvtMouse: false, pixelMouse: false })
+    screen.process(enc.encode(`\x1b[?${encoding}l`))
+    expect(screen.getMode("mouseTracking")).toBe(true)
+    expect(screen.snapshot().modes.mouseTrackingMode).toBe(1002)
+    if (encoding === 1016) expect(screen.getMode("pixelMouse")).toBe(false)
+  })
+
   test("1000 basic tracking", () => {
     const screen = screenWith("\x1b[?1000h")
     expect(screen.getMode("mouseTracking")).toBe(true)

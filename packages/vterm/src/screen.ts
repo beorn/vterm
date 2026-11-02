@@ -250,6 +250,9 @@ export interface Snapshot {
     mouseTracking: boolean
     mouseTrackingMode: number
     sgrMouse: boolean
+    /** Independent encoding flags; absent in older version-1 snapshots means reset. */
+    urxvtMouse?: boolean
+    pixelMouse?: boolean
     focusTracking: boolean
     origin: boolean
     insert: boolean
@@ -435,10 +438,12 @@ export interface TerminalModes {
   applicationKeypad: boolean
   autoWrap: boolean
   mouseTracking: boolean
-  /** The active mouse-tracking protocol: `0` = off; `1000`/`1002`/`1003` = X10/button/any-event. */
+  /** The active tracking protocol: `0` = off; `9`/`1000`/`1002`/`1003` = X10/normal/button/any-event. */
   mouseTrackingMode: number
   sgrMouse: boolean
   utf8Mouse: boolean
+  urxvtMouse: boolean
+  pixelMouse: boolean
   focusTracking: boolean
   originMode: boolean
   insertMode: boolean
@@ -1254,8 +1259,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let applicationKeypad = false
   let autoWrap = true
   let mouseTracking = false
-  let mouseTrackingMode = 0 // 1000, 1002, 1003
+  let mouseTrackingMode = 0 // 9, 1000, 1002, 1003
   let sgrMouse = false
+  let urxvtMouse = false
+  let pixelMouse = false
   let focusTracking = false
   let originMode = false
   let insertMode = false
@@ -1531,6 +1538,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       assertBoolean(`modes.${name}`, modes[name])
     }
     assertInteger("modes.mouseTrackingMode", modes.mouseTrackingMode)
+    for (const name of ["urxvtMouse", "pixelMouse"]) {
+      if (Object.hasOwn(modes, name)) assertBoolean(`modes.${name}`, modes[name])
+    }
     assertInteger("modes.kittyKeyboardFlags", modes.kittyKeyboardFlags)
     if (!Array.isArray(modes.kittyKeyboardStack)) {
       throw new TypeError("Invalid vterm snapshot modes.kittyKeyboardStack")
@@ -2850,10 +2860,17 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           case 66:
             value = applicationKeypad ? 1 : 2
             break
+          case 9:
           case 1000:
           case 1002:
           case 1003:
-            value = mouseTracking ? 1 : 2
+            value = mouseTrackingMode === mode ? 1 : 2
+            break
+          case 1015:
+            value = urxvtMouse ? 1 : 2
+            break
+          case 1016:
+            value = pixelMouse ? 1 : 2
             break
           case 1004:
             value = focusTracking ? 1 : 2
@@ -2967,10 +2984,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case 1000: // Mouse tracking (basic)
         case 1002: // Mouse tracking (button events)
         case 1003: // Mouse tracking (all events)
-        case 1015: // urxvt mouse encoding
-        case 1016: // SGR pixel mouse
           mouseTracking = set
           mouseTrackingMode = set ? code : 0
+          break
+        case 1015: // urxvt mouse encoding is independent of tracking
+          urxvtMouse = set
+          break
+        case 1016: // SGR pixel encoding is independent of tracking
+          pixelMouse = set
           break
         case 1004: // Focus tracking
           focusTracking = set
@@ -4203,6 +4224,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     mouseTracking = false
     mouseTrackingMode = 0
     sgrMouse = false
+    urxvtMouse = false
+    pixelMouse = false
     focusTracking = false
     originMode = false
     insertMode = false
@@ -5152,6 +5175,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         mouseTracking,
         mouseTrackingMode,
         sgrMouse,
+        urxvtMouse,
+        pixelMouse,
         focusTracking,
         origin: originMode,
         insert: insertMode,
@@ -5260,6 +5285,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     mouseTracking = snapshotValue.modes.mouseTracking
     mouseTrackingMode = snapshotValue.modes.mouseTrackingMode
     sgrMouse = snapshotValue.modes.sgrMouse
+    urxvtMouse = snapshotValue.modes.urxvtMouse ?? false
+    pixelMouse = snapshotValue.modes.pixelMouse ?? false
     focusTracking = snapshotValue.modes.focusTracking
     originMode = snapshotValue.modes.origin
     insertMode = snapshotValue.modes.insert
@@ -5496,7 +5523,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       case "sgrMouse":
         return sgrMouse
       case "pixelMouse":
-        return mouseTrackingMode === 1016
+        return pixelMouse
       case "leftRightMargin":
         return leftRightMarginMode
       case "colorSchemeReporting":
@@ -5600,6 +5627,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       mouseTrackingMode,
       sgrMouse,
       utf8Mouse: utf8MouseMode,
+      urxvtMouse,
+      pixelMouse,
       focusTracking,
       originMode,
       insertMode,
@@ -5626,6 +5655,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       a.mouseTrackingMode === b.mouseTrackingMode &&
       a.sgrMouse === b.sgrMouse &&
       a.utf8Mouse === b.utf8Mouse &&
+      a.urxvtMouse === b.urxvtMouse &&
+      a.pixelMouse === b.pixelMouse &&
       a.focusTracking === b.focusTracking &&
       a.originMode === b.originMode &&
       a.insertMode === b.insertMode &&
@@ -6125,6 +6156,8 @@ const SERIALIZE_DECSET_FLAGS = [
   ["utf8Mouse", 1005],
   ["sgrMouse", 1006],
   ["altScroll", 1007],
+  ["urxvtMouse", 1015],
+  ["pixelMouse", 1016],
   ["bracketedPaste", 2004],
   ["colorSchemeReporting", 2031],
 ] as const satisfies readonly (readonly [keyof Snapshot["modes"], number])[]
@@ -6212,7 +6245,7 @@ export function serializeSnapshot(snapshot: Snapshot, options: SerializeOptions 
     if (m[key] === true && !excluded.has(key)) out.push(`\x1b[?${String(code)}h`)
   }
   if (m.mouseTracking && m.mouseTrackingMode > 0 && !excluded.has("mouseTracking")) {
-    // The EXACT stored mode — 9/1000/1002/1003/1015/1016, not a canonicalized subset.
+    // Tracking and encoding are independent: only 9/1000/1002/1003 belong here.
     out.push(`\x1b[?${String(m.mouseTrackingMode)}h`)
   }
   if (m.applicationKeypad && !excluded.has("applicationKeypad")) out.push("\x1b=")

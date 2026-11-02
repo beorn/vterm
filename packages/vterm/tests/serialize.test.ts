@@ -623,9 +623,20 @@ describe("serializeSnapshot — mode emission", () => {
       },
     ],
     [
-      "mouse pixel ?1016 (exact stored code, not just 1000/1002/1003)",
-      `${ESC}[?1016h`,
-      (m) => expect(m.modes.mouseTrackingMode).toBe(1016),
+      "mouse pixel encoding ?1016 preserves button tracking ?1002",
+      `${ESC}[?1002h${ESC}[?1016h`,
+      (m) => {
+        expect(m.modes.mouseTrackingMode).toBe(1002)
+        expect(m.modes.pixelMouse).toBe(true)
+      },
+    ],
+    [
+      "urxvtMouse ?1015",
+      `${ESC}[?1015h`,
+      (m) => {
+        expect(m.modes.urxvtMouse).toBe(true)
+        expect(m.modes.mouseTracking).toBe(false)
+      },
     ],
     ["sgrMouse ?1006", `${ESC}[?1006h`, (m) => expect(m.modes.sgrMouse).toBe(true)],
     ["utf8Mouse ?1005", `${ESC}[?1005h`, (m) => expect(m.modes.utf8Mouse).toBe(true)],
