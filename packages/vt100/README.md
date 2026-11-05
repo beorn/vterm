@@ -55,7 +55,7 @@ console.log(screen.getCursorPosition()) // { x: 18, y: 0 }
 | Method                         | Description                        |
 | ------------------------------ | ---------------------------------- |
 | `process(data: Uint8Array)`    | Feed raw terminal data             |
-| `encodePaste(text: string)`    | Return native paste as UTF-8 bytes  |
+| `encodePaste(text: string)`    | Return native paste as UTF-8 bytes |
 | `getText()`                    | Get all text (scrollback + screen) |
 | `getTextRange(sr, sc, er, ec)` | Get text in a range                |
 | `getLine(row)`                 | Get cells for a row                |
