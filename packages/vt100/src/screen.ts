@@ -272,20 +272,6 @@ export function createScreen(opts: ScreenOptions): Screen {
         curX -= Math.max(parts[0] ?? 1, 1)
         clampCursor()
         break
-      case "E": // CNL - Cursor Next Line
-        curY += Math.max(parts[0] ?? 1, 1)
-        curX = 0
-        clampCursor()
-        break
-      case "F": // CPL - Cursor Previous Line
-        curY -= Math.max(parts[0] ?? 1, 1)
-        curX = 0
-        clampCursor()
-        break
-      case "G": // CHA - Cursor Horizontal Absolute
-        curX = (parts[0] ?? 1) - 1
-        clampCursor()
-        break
       case "H": // CUP - Cursor Position
       case "f": // HVP - same as CUP
         curY = (parts[0] ?? 1) - 1
@@ -297,20 +283,6 @@ export function createScreen(opts: ScreenOptions): Screen {
         break
       case "K": // EL - Erase in Line
         handleEraseLine(parts[0] ?? 0)
-        break
-      case "S": // SU - Scroll Up
-        for (let i = 0; i < Math.max(parts[0] ?? 1, 1); i++) {
-          scrollUp(scrollTop, scrollBottom)
-        }
-        break
-      case "T": // SD - Scroll Down
-        for (let i = 0; i < Math.max(parts[0] ?? 1, 1); i++) {
-          scrollDown(scrollTop, scrollBottom)
-        }
-        break
-      case "d": // VPA - Line Position Absolute
-        curY = (parts[0] ?? 1) - 1
-        clampCursor()
         break
       case "m": // SGR - Select Graphic Rendition
         handleSGR(params)
@@ -346,15 +318,6 @@ export function createScreen(opts: ScreenOptions): Screen {
           }
         }
         break
-      case "s": // SCP - Save Cursor Position
-        savedCurX = curX
-        savedCurY = curY
-        break
-      case "u": // RCP - Restore Cursor Position
-        curX = savedCurX
-        curY = savedCurY
-        clampCursor()
-        break
       default:
         // Unknown CSI sequence — ignore
         break
@@ -384,9 +347,6 @@ export function createScreen(opts: ScreenOptions): Screen {
         case 7: // DECAWM - Autowrap Mode
           autoWrap = set
           break
-        case 25: // DECTCEM - Cursor Visible
-          curVisible = set
-          break
         case 66: // DECNKM - Application Keypad
           applicationKeypad = set
           break
@@ -409,12 +369,8 @@ export function createScreen(opts: ScreenOptions): Screen {
         eraseCells(curY, 0, curY, curX)
         break
       case 2: // Erase entire display
-      case 3: // Erase entire display + scrollback
         for (let row = 0; row < rows; row++) {
           eraseCells(row, 0, row, cols - 1)
-        }
-        if (mode === 3) {
-          scrollback.length = 0
         }
         break
     }
@@ -444,7 +400,7 @@ export function createScreen(opts: ScreenOptions): Screen {
 
   // ── SGR (Select Graphic Rendition) ──
   // VT100 is monochrome: only bold (1), underline (4), blink (5), reverse (7).
-  // Color codes are silently ignored for forward compatibility.
+  // Every other operand is ignored independently.
 
   function handleSGR(rawParams: string): void {
     // Colon groups are unsupported as a whole; NaN follows the existing unknown-code path.
@@ -455,9 +411,7 @@ export function createScreen(opts: ScreenOptions): Screen {
       return
     }
 
-    let i = 0
-    while (i < params.length) {
-      const code = params[i]!
+    for (const code of params) {
       switch (code) {
         case 0:
           attrs = resetAttrs()
@@ -474,52 +428,8 @@ export function createScreen(opts: ScreenOptions): Screen {
         case 7:
           attrs.inverse = true
           break
-        case 22: // Normal intensity (turn off bold)
-          attrs.bold = false
-          break
-        case 24:
-          attrs.underline = false
-          break
-        case 25: // Blink off
-          attrs.blink = false
-          break
-        case 27:
-          attrs.inverse = false
-          break
-        // Color codes silently ignored — VT100 is monochrome
-        // Skip extended color sequences to consume params correctly
-        case 38:
-        case 48:
-        case 58:
-          if (i + 1 < params.length && params[i + 1] === 2) {
-            i += 4 // skip 38;2;R;G;B or 48;2;R;G;B
-          } else if (i + 1 < params.length && params[i + 1] === 5) {
-            i += 2 // skip 38;5;N or 48;5;N
-          }
-          break
-        // All other SGR codes (colors 30-37, 40-47, 39, 49, 8, 28, etc.)
-        // are silently ignored for forward compatibility
+        // The VT100 operand set is closed: all other values are ignored.
       }
-      i++
-    }
-  }
-
-  // ── OSC handler ──
-
-  function handleOSC(oscString: string): void {
-    const semicolonIdx = oscString.indexOf(";")
-    if (semicolonIdx === -1) return
-
-    const code = parseInt(oscString.substring(0, semicolonIdx), 10)
-    const value = oscString.substring(semicolonIdx + 1)
-
-    switch (code) {
-      case 0: // Set icon name and window title
-      case 2: // Set window title
-        title = value
-        break
-      case 1: // Set icon name (ignore)
-        break
     }
   }
 
@@ -660,7 +570,6 @@ export function createScreen(opts: ScreenOptions): Screen {
         case "osc":
           if (code === 0x07) {
             // BEL terminates OSC
-            handleOSC(oscBuf)
             parserState = "ground"
           } else if (code === 0x1b) {
             // ESC might be start of ST (\x1b\\)
@@ -674,11 +583,7 @@ export function createScreen(opts: ScreenOptions): Screen {
           break
 
         case "oscString":
-          if (ch === "\\") {
-            // ST (String Terminator) — end of OSC
-            handleOSC(oscBuf)
-          }
-          // Either way, back to ground
+          // ST terminates OSC; other bytes keep the existing return-to-ground behavior.
           parserState = "ground"
           break
 

@@ -162,15 +162,17 @@ describe("Vt100Screen", () => {
 
   // ── Text attributes (VT100 subset) ──
 
-  // Unsupported underline colours must consume operands without executing them as SGR codes.
+  // R2: each semicolon operand is independent; prior tests required non-DEC group isolation.
   test.each([
-    ["58;5;1", false, false, false],
-    ["58;2;1;2;3", false, false, false],
-    ["58;5;1;25", false, false, false],
-    ["1;58;5;5;4", true, false, true],
+    ["58;5;1", true, true, false],
+    ["38;2;1;4;5", true, true, true],
+    ["48;2;1;4;5", true, true, true],
+    ["58;2;1;2;3", true, false, false],
+    ["58;5;1;25", true, true, false],
+    ["1;58;5;5;4", true, true, true],
     ["58;5;1;1;5;4", true, true, true],
     ["1;4;5;59", true, true, true],
-  ] as const)("isolates unsupported SGR operands in %s", (params, bold, blink, underline) => {
+  ] as const)("applies documented SGR operands independently in %s", (params, bold, blink, underline) => {
     const s = createScreen({ cols: 80, rows: 2 })
     s.feed(new TextEncoder().encode(`\x1b[${params}mX`))
     expect(s.getCell(0, 0)).toMatchObject({ char: "X", bold, blink, underline, fg: null, bg: null })
@@ -201,7 +203,7 @@ describe("Vt100Screen", () => {
       const s = createScreen({ cols: 80, rows: 2 })
       s.feed(bytes.slice(0, split))
       s.feed(bytes.slice(split))
-      expect(s.getTitle(), `split=${split}`).toBe("prior")
+      expect(s.getTitle(), `split=${split}`).toBe("")
       expect(s.getText().trim(), `split=${split}`).toBe("Y")
     }
   })
@@ -236,11 +238,11 @@ describe("Vt100Screen", () => {
       ["1;4:3;31", false, true],
       ["4:3;1", false, true],
       ["4;4:3", true, false],
-      ["4;4:3;24", false, false],
+      ["4;4:3;24", true, false],
       ["4;0", false, false],
       ["4;", false, false],
       ["1;38:2::1:2:3;4", true, true],
-      ["38;2;1;2;3;4", true, false],
+      ["38;2;1;2;3;4", true, true],
     ] as const) {
       s.reset()
       s.feed(new TextEncoder().encode(`\x1b[${params}mX`))
@@ -248,11 +250,11 @@ describe("Vt100Screen", () => {
     }
   })
 
-  test("SGR 24 turns off underline", () => {
+  test("SGR 24 is ignored and preserves underline", () => {
     const s = createScreen({ cols: 80, rows: 24 })
     s.feed(new TextEncoder().encode("\x1b[4mU\x1b[24mN"))
     expect(s.getCell(0, 0).underline).toBe(true)
-    expect(s.getCell(0, 1).underline).toBe(false)
+    expect(s.getCell(0, 1).underline).toBe(true)
   })
 
   test("blink attribute detection (SGR 5)", () => {
@@ -262,11 +264,11 @@ describe("Vt100Screen", () => {
     expect(cell.blink).toBe(true)
   })
 
-  test("SGR 25 turns off blink", () => {
+  test("SGR 25 is ignored and preserves blink", () => {
     const s = createScreen({ cols: 80, rows: 24 })
     s.feed(new TextEncoder().encode("\x1b[5mB\x1b[25mN"))
     expect(s.getCell(0, 0).blink).toBe(true)
-    expect(s.getCell(0, 1).blink).toBe(false)
+    expect(s.getCell(0, 1).blink).toBe(true)
   })
 
   test("inverse attribute detection", () => {
@@ -284,11 +286,53 @@ describe("Vt100Screen", () => {
     expect(cell.hidden).toBe(false)
   })
 
-  test("SGR 22 turns off bold", () => {
+  test("SGR 22 is ignored and preserves bold", () => {
     const s = createScreen({ cols: 80, rows: 24 })
     s.feed(new TextEncoder().encode("\x1b[1mB\x1b[22mN"))
     expect(s.getCell(0, 0).bold).toBe(true)
-    expect(s.getCell(0, 1).bold).toBe(false)
+    expect(s.getCell(0, 1).bold).toBe(true)
+  })
+
+  // R2 closed operands: old coverage omitted inverse reset and mixed valid/unknown siblings.
+  test("unknown SGR operands preserve attributes while valid siblings apply", () => {
+    const s = createScreen({ cols: 20, rows: 3 })
+    s.feed(new TextEncoder().encode("\x1b[1;4;5;7mA\x1b[22;24;25;27;31mB\x1b[0;31;1;4;5;7mC\x1b[0mD"))
+    for (const col of [0, 1, 2])
+      expect(s.getCell(0, col)).toMatchObject({
+        bold: true,
+        underline: true,
+        blink: true,
+        inverse: true,
+        fg: null,
+        bg: null,
+      })
+    expect(s.getCell(0, 3)).toMatchObject({ bold: false, underline: false, blink: false, inverse: false })
+  })
+
+  // R1: no existing coverage rejected CNL/CPL, ED3 or XTWINOPS and witnessed recovery.
+  test.each(["3E", "2F"])("unsupported CSI %s leaves cursor unchanged", (command) => {
+    const s = createScreen({ cols: 20, rows: 5 })
+    s.feed(new TextEncoder().encode(`\x1b[3;8H\x1b[${command}`))
+    expect(s.getCursor()).toMatchObject({ x: 7, y: 2 })
+  })
+
+  test("ED 3 preserves display and retained host history", () => {
+    const s = createScreen({ cols: 20, rows: 2 })
+    s.feed(new TextEncoder().encode("old\r\nline\r\nvisible"))
+    const text = s.getText()
+    const history = s.screen.getScrollbackLength()
+    s.feed(new TextEncoder().encode("\x1b[3J"))
+    expect(s.getText()).toBe(text)
+    expect(s.screen.getScrollbackLength()).toBe(history)
+  })
+
+  test("XTWINOPS 18 sends no reply and subsequent DSR/CPR recover", () => {
+    const onResponse = vi.fn()
+    const s = createScreen({ cols: 20, rows: 5, onResponse })
+    s.feed(new TextEncoder().encode("\x1b[3;8H\x1b[18t"))
+    expect(onResponse).not.toHaveBeenCalled()
+    s.feed(new TextEncoder().encode("\x1b[5n\x1b[6n"))
+    expect(onResponse.mock.calls).toEqual([["\x1b[0n"], ["\x1b[3;8R"]])
   })
 
   // ── Cursor ──
@@ -320,12 +364,12 @@ describe("Vt100Screen", () => {
     expect(cursor.y).toBe(4)
   })
 
-  test("cursor visibility via DECTCEM", () => {
+  test("DECTCEM is ignored", () => {
     const s = createScreen({ cols: 80, rows: 24 })
     expect(s.getCursor().visible).toBe(true)
     // Hide cursor
     s.feed(new TextEncoder().encode("\x1b[?25l"))
-    expect(s.getCursor().visible).toBe(false)
+    expect(s.getCursor().visible).toBe(true)
     // Show cursor
     s.feed(new TextEncoder().encode("\x1b[?25h"))
     expect(s.getCursor().visible).toBe(true)
@@ -445,24 +489,24 @@ describe("Vt100Screen", () => {
 
   // ── Title ──
 
-  test("title changes via OSC 2", () => {
+  test("title stays empty after OSC 2", () => {
     const s = createScreen({ cols: 80, rows: 24 })
     expect(s.getTitle()).toBe("")
     // OSC 2 ; title ST (using BEL as terminator)
     s.feed(new TextEncoder().encode("\x1b]2;my terminal title\x07"))
-    expect(s.getTitle()).toBe("my terminal title")
+    expect(s.getTitle()).toBe("")
   })
 
-  test("title changes via OSC 0", () => {
+  test("title stays empty after OSC 0", () => {
     const s = createScreen({ cols: 80, rows: 24 })
     s.feed(new TextEncoder().encode("\x1b]0;window title\x07"))
-    expect(s.getTitle()).toBe("window title")
+    expect(s.getTitle()).toBe("")
   })
 
-  test("title changes via OSC with ST terminator", () => {
+  test("title stays empty after OSC with ST terminator", () => {
     const s = createScreen({ cols: 80, rows: 24 })
     s.feed(new TextEncoder().encode("\x1b]2;st title\x1b\\"))
-    expect(s.getTitle()).toBe("st title")
+    expect(s.getTitle()).toBe("")
   })
 
   // ── Reset ──
@@ -644,7 +688,7 @@ describe("Vt100Screen", () => {
       expect(s.getCursor().y).toBe(0)
     })
 
-    test("scroll up (SU) within region", () => {
+    test.each(["S", "T"])("CSI %s leaves scroll region contents unchanged", (command) => {
       const s = createScreen({ cols: 20, rows: 5 })
       const enc = (str: string) => new TextEncoder().encode(str)
 
@@ -658,14 +702,28 @@ describe("Vt100Screen", () => {
       s.feed(enc("\x1b[2;4r"))
       // Position cursor inside region
       s.feed(enc("\x1b[2;1H"))
-      // Scroll up once (CSI S)
-      s.feed(enc("\x1b[1S"))
+      // Unsupported SU/SD must leave the region unchanged.
+      s.feed(enc(`\x1b[1${command}`))
 
       const text = s.getText()
       // Row 0 (above region) should be preserved
       expect(text).toContain("LINE-0")
       // Row 4 (below region) should be preserved
       expect(text).toContain("LINE-4")
+      expect(
+        s
+          .getLine(1)
+          .map((cell) => cell.char)
+          .join("")
+          .trim(),
+      ).toBe("LINE-1")
+      expect(
+        s
+          .getLine(3)
+          .map((cell) => cell.char)
+          .join("")
+          .trim(),
+      ).toBe("LINE-3")
     })
   })
 
@@ -809,19 +867,19 @@ describe("Vt100Screen", () => {
       expect(s.getCursor().y).toBe(0) // y unchanged
     })
 
-    test("CHA (cursor horizontal absolute) sets column", () => {
+    test("CHA (cursor horizontal absolute) is ignored", () => {
       const s = createScreen({ cols: 80, rows: 24 })
       s.feed(new TextEncoder().encode("\x1b[3;10H")) // row 2, col 9
       s.feed(new TextEncoder().encode("\x1b[5G")) // col 5 (1-based) = col 4 (0-based)
-      expect(s.getCursor().x).toBe(4)
+      expect(s.getCursor().x).toBe(9)
       expect(s.getCursor().y).toBe(2) // y unchanged
     })
 
-    test("VPA (line position absolute) sets row", () => {
+    test("VPA (line position absolute) is ignored", () => {
       const s = createScreen({ cols: 80, rows: 24 })
       s.feed(new TextEncoder().encode("\x1b[1;10H")) // row 0, col 9
       s.feed(new TextEncoder().encode("\x1b[3d")) // row 3 (1-based) = row 2 (0-based)
-      expect(s.getCursor().y).toBe(2)
+      expect(s.getCursor().y).toBe(0)
       expect(s.getCursor().x).toBe(9) // x unchanged
     })
 
@@ -891,24 +949,12 @@ describe("Vt100Screen", () => {
       expect(s.getCursor().y).toBe(9)
     })
 
-    test("CSI s / CSI u saves and restores cursor position", () => {
+    test("CSI s / CSI u leave cursor and DEC saved position unchanged", () => {
       const s = createScreen({ cols: 80, rows: 24 })
-      s.feed(new TextEncoder().encode("\x1b[5;15H")) // row 4, col 14
-      expect(s.getCursor().x).toBe(14)
-      expect(s.getCursor().y).toBe(4)
-
-      // Save cursor (CSI s)
-      s.feed(new TextEncoder().encode("\x1b[s"))
-
-      // Move cursor elsewhere
-      s.feed(new TextEncoder().encode("\x1b[20;60H"))
-      expect(s.getCursor().x).toBe(59)
-      expect(s.getCursor().y).toBe(19)
-
-      // Restore cursor (CSI u)
-      s.feed(new TextEncoder().encode("\x1b[u"))
-      expect(s.getCursor().x).toBe(14)
-      expect(s.getCursor().y).toBe(4)
+      s.feed(new TextEncoder().encode("\x1b[2;3H\x1b7\x1b[5;15H\x1b[s\x1b[20;60H\x1b[u"))
+      expect(s.getCursor()).toMatchObject({ x: 59, y: 19 })
+      s.feed(new TextEncoder().encode("\x1b8"))
+      expect(s.getCursor()).toMatchObject({ x: 2, y: 1 })
     })
 
     test("restore cursor clamps to screen bounds after resize", () => {
@@ -1130,11 +1176,11 @@ describe("Vt100Screen", () => {
       expect(s.getCursor().y).toBe(0) // (1-1 = 0)
     })
 
-    test("CHA with 0 parameter treated as column 1", () => {
+    test("CHA with 0 parameter is ignored", () => {
       const s = createScreen({ cols: 80, rows: 24 })
       s.feed(new TextEncoder().encode("\x1b[5;20H")) // move to col 19
-      s.feed(new TextEncoder().encode("\x1b[0G")) // CHA 0 -> treated as 1
-      expect(s.getCursor().x).toBe(0)
+      s.feed(new TextEncoder().encode("\x1b[0G")) // Unsupported even with zero parameter
+      expect(s.getCursor().x).toBe(19)
     })
 
     test("multiple resets don't cause errors", () => {
@@ -1210,7 +1256,7 @@ describe("Vt100Screen", () => {
       expect(s.getText()).toContain("ABC")
     })
 
-    test("256-color and truecolor SGR sequences are silently ignored", () => {
+    test("256-color and truecolor operands never set colors", () => {
       const s = createScreen({ cols: 80, rows: 24 })
       // These sequences should not crash, just be ignored
       s.feed(new TextEncoder().encode("\x1b[38;5;208mX\x1b[0m"))

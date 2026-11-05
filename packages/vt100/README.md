@@ -7,17 +7,21 @@ Part of the [vterm](https://github.com/beorn/vterm) monorepo.
 ## Features
 
 - Strict DEC VT100 (1978) emulation — monochrome display
-- SGR attributes: bold, underline (boolean), blink, inverse
-- Cursor movement (CUP, CUU, CUD, CUF, CUB, CHA, CNL, CPL, HVP, VPA)
+- SGR operands: reset (0), bold (1), underline (4), blink (5), inverse (7)
+- Cursor movement (CUP, CUU, CUD, CUF, CUB, HVP)
 - Cursor save/restore (DECSC/DECRC)
 - Erase display/line (ED/EL)
 - Scroll regions (DECSTBM) with content preservation
-- Scroll up/down (SU/SD)
+- Index/reverse index/next line (IND/RI/NEL)
 - Scrollback buffer with configurable limit
-- Screen modes (auto-wrap, origin mode, cursor visibility)
+- Screen modes (auto-wrap, origin mode)
 - DEC special graphics charset
 - DA1/DSR/CPR device responses
 - Zero dependencies — works in Bun, Node.js, and browsers
+
+Unsupported controls are ignored, including CHA/VPA/CNL/CPL, CSI s/u,
+SU/SD, ED 3, DECTCEM and XTWINOPS. OSC strings are consumed without setting
+a title. SGR 22/24/25/27 do not reset attributes; use SGR 0.
 
 ## Install
 
@@ -52,23 +56,23 @@ console.log(screen.getCursorPosition()) // { x: 18, y: 0 }
 
 ### Screen methods
 
-| Method                         | Description                        |
-| ------------------------------ | ---------------------------------- |
-| `process(data: Uint8Array)`    | Feed raw terminal data             |
-| `encodePaste(text: string)`    | Return native paste as UTF-8 bytes |
-| `getText()`                    | Get all text (scrollback + screen) |
-| `getTextRange(sr, sc, er, ec)` | Get text in a range                |
-| `getLine(row)`                 | Get cells for a row                |
-| `getCell(row, col)`            | Get a single cell                  |
-| `getCursorPosition()`          | Get cursor `{ x, y }`              |
-| `getCursorVisible()`           | Check cursor visibility            |
-| `getMode(mode)`                | Check terminal mode                |
-| `getTitle()`                   | Get window title                   |
-| `getScrollbackLength()`        | Number of scrollback lines         |
-| `getViewportOffset()`          | Current viewport scroll offset     |
-| `scrollViewport(delta)`        | Scroll viewport                    |
-| `resize(cols, rows)`           | Resize terminal                    |
-| `reset()`                      | Reset to initial state             |
+| Method                         | Description                           |
+| ------------------------------ | ------------------------------------- |
+| `process(data: Uint8Array)`    | Feed raw terminal data                |
+| `encodePaste(text: string)`    | Return native paste as UTF-8 bytes    |
+| `getText()`                    | Get all text (scrollback + screen)    |
+| `getTextRange(sr, sc, er, ec)` | Get text in a range                   |
+| `getLine(row)`                 | Get cells for a row                   |
+| `getCell(row, col)`            | Get a single cell                     |
+| `getCursorPosition()`          | Get cursor `{ x, y }`                 |
+| `getCursorVisible()`           | Check cursor visibility               |
+| `getMode(mode)`                | Check terminal mode                   |
+| `getTitle()`                   | Always empty (no VT100 title surface) |
+| `getScrollbackLength()`        | Number of scrollback lines            |
+| `getViewportOffset()`          | Current viewport scroll offset        |
+| `scrollViewport(delta)`        | Scroll viewport                       |
+| `resize(cols, rows)`           | Resize terminal                       |
+| `reset()`                      | Reset to initial state                |
 
 ### Paste input
 
