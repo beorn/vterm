@@ -31,3 +31,17 @@ set a title. DEC cursor save/restore (ESC 7/8), IND/NEL/RI, DECAWM, DECTCEM,
 insert/delete operations and selective erase remain available.
 
 Snapshots retain the historical mode set; paste encoding adds no stored state.
+
+`getUnhandledSequences()` returns copied, ordered reports from the engine's
+existing ignore paths: `{ kind: "osc", code: "777" }` for a completed OSC command,
+or `{ kind: "csi", code: "3m" }` for each ignored numeric SGR operand. It records
+only non-negative safe integers, normalized without leading zeros, never payloads
+or reconstructed input. Colon groups have already lost their numeric identity
+and produce no report. Incomplete, malformed or overflowing OSC input also
+produces none. An empty report makes no support decision.
+
+History retains at least the most recent 1000 reports, dropping the oldest in
+bulk after it grows past 2000. Public reset and RIS clear it; DECSTR, SGR 0 and
+resize preserve it. History belongs to this instance and is not serialized in
+snapshots: restore preserves the destination's existing history. Completing a
+restored pending OSC records a new observation when its terminator arrives.

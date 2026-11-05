@@ -12,6 +12,8 @@
 
 import { encodePaste } from "../../../shared/paste.ts"
 
+const UNHANDLED_SEQUENCE_LIMIT = 1000
+
 // ═══════════════════════════════════════════════════════
 // Internal cell representation
 // ═══════════════════════════════════════════════════════
@@ -119,6 +121,8 @@ export interface Screen {
   getCursorPosition(): { x: number; y: number }
   getCursorVisible(): boolean
   getTitle(): string
+  /** Copied, ordered ignored OSC commands and numeric SGR operands; no entry means no decision. */
+  getUnhandledSequences(): readonly { readonly kind: "osc" | "csi"; readonly code: string }[]
   getMode(mode: string): boolean | null
   getScrollbackLength(): number
   getViewportOffset(): number
@@ -181,6 +185,20 @@ export function createScreen(opts: ScreenOptions): Screen {
   let parserState: "ground" | "escape" | "csi" | "osc" | "dcs" | "oscString" = "ground"
   let escBuf = ""
   let oscBuf = ""
+  const unhandledSequences: { readonly kind: "osc" | "csi"; readonly code: string }[] = []
+
+  function recordUnhandledSequence(kind: "osc" | "csi", code: number): void {
+    if (!Number.isSafeInteger(code) || code < 0) return
+    unhandledSequences.push({ kind, code: kind === "csi" ? String(code) + "m" : String(code) })
+    if (unhandledSequences.length > UNHANDLED_SEQUENCE_LIMIT * 2) {
+      unhandledSequences.splice(0, unhandledSequences.length - UNHANDLED_SEQUENCE_LIMIT)
+    }
+  }
+
+  function reportIgnoredOsc(): void {
+    const command = /^(\d+)(?:;|$)/.exec(oscBuf)?.[1]
+    if (command !== undefined) recordUnhandledSequence("osc", Number(command))
+  }
 
   // Decoder for incoming bytes
   const decoder = new TextDecoder()
@@ -593,6 +611,9 @@ export function createScreen(opts: ScreenOptions): Screen {
         case 27:
           attrs.inverse = false
           break
+        default:
+          recordUnhandledSequence("csi", code)
+          break
       }
     }
   }
@@ -754,6 +775,7 @@ export function createScreen(opts: ScreenOptions): Screen {
         case "osc":
           if (code === 0x07) {
             // BEL terminates OSC
+            reportIgnoredOsc()
             parserState = "ground"
           } else if (code === 0x1b) {
             // ESC might be start of ST (\x1b\\)
@@ -768,6 +790,7 @@ export function createScreen(opts: ScreenOptions): Screen {
 
         case "oscString":
           // ST or any other byte ends the existing OSC consumption.
+          if (ch === "\\") reportIgnoredOsc()
           parserState = "ground"
           break
 
@@ -805,6 +828,7 @@ export function createScreen(opts: ScreenOptions): Screen {
     parserState = "ground"
     escBuf = ""
     oscBuf = ""
+    unhandledSequences.length = 0
   }
 
   function softReset(): void {
@@ -1016,6 +1040,7 @@ export function createScreen(opts: ScreenOptions): Screen {
     getCursorPosition: () => ({ x: curX, y: curY }),
     getCursorVisible: () => curVisible,
     getTitle: () => title,
+    getUnhandledSequences: () => unhandledSequences.map((entry) => ({ ...entry })),
     getMode,
     getScrollbackLength: () => scrollback.length,
     getViewportOffset: () => viewportOffset,
