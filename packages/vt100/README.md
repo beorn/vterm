@@ -56,23 +56,23 @@ console.log(screen.getCursorPosition()) // { x: 18, y: 0 }
 
 ### Screen methods
 
-| Method                         | Description                           |
-| ------------------------------ | ------------------------------------- |
-| `process(data: Uint8Array)`    | Feed raw terminal data                |
-| `encodePaste(text: string)`    | Return native paste as UTF-8 bytes    |
-| `getText()`                    | Get all text (scrollback + screen)    |
-| `getTextRange(sr, sc, er, ec)` | Get text in a range                   |
-| `getLine(row)`                 | Get cells for a row                   |
-| `getCell(row, col)`            | Get a single cell                     |
-| `getCursorPosition()`          | Get cursor `{ x, y }`                 |
-| `getCursorVisible()`           | Check cursor visibility               |
-| `getMode(mode)`                | Check terminal mode                   |
-| `getTitle()`                   | Always empty (no VT100 title surface) |
-| `getScrollbackLength()`        | Number of scrollback lines            |
-| `getViewportOffset()`          | Current viewport scroll offset        |
-| `scrollViewport(delta)`        | Scroll viewport                       |
-| `resize(cols, rows)`           | Resize terminal                       |
-| `reset()`                      | Reset to initial state                |
+| Method                         | Description                                   |
+| ------------------------------ | --------------------------------------------- |
+| `process(data: Uint8Array)`    | Feed raw terminal data                        |
+| `encodePaste(text: string)`    | Return native paste as UTF-8 bytes            |
+| `getText()`                    | Get all text (scrollback + screen)            |
+| `getTextRange(sr, sc, er, ec)` | Get text in a range                           |
+| `getLine(row)`                 | Get cells for a row                           |
+| `getCell(row, col)`            | Get a single cell                             |
+| `getCursorPosition()`          | Get cursor `{ x, y }`                         |
+| `getCursorVisible()`           | Check cursor visibility                       |
+| `getMode(mode)`                | Check terminal mode                           |
+| `getTitle()`                   | Always empty (no VT100 title surface)         |
+| `getScrollbackLength()`        | Number of scrollback lines                    |
+| `getViewportOffset()`          | Current viewport scroll offset                |
+| `scrollViewport(delta)`        | Scroll viewport                               |
+| `resize(cols, rows)`           | Resize terminal                               |
+| `reset()`                      | Reset to initial state                        |
 | `getUnhandledSequences()`      | Copy ignored OSC identifiers and SGR operands |
 
 ### Ignored-sequence reports
