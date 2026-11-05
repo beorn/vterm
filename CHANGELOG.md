@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.13.0
+
+- vt100.js and vt220.js add `Screen.getUnhandledSequences()`: copied, ordered
+  identifiers for completed ignored OSC commands and native ignored SGR operands.
+  Reports contain no OSC payload, accept only non-negative safe integers and
+  retain at least the newest 1000 entries. Reset and RIS clear the history.
+- Preserve existing terminal handling. Colon SGR groups, malformed or incomplete
+  OSC input, buffer overflow and unsafe numeric identifiers produce no report;
+  an empty report does not establish feature support.
+- vterm.js behavior is unchanged; its version advances with the shared release.
+
 ## 0.12.0
 
 - Breaking, vt100.js and vt220.js: ignore CHA, VPA, CNL, CPL, CSI s/u,
