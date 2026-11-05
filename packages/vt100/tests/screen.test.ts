@@ -297,7 +297,7 @@ describe("Vt100Screen", () => {
   test("unknown SGR operands preserve attributes while valid siblings apply", () => {
     const s = createScreen({ cols: 20, rows: 3 })
     s.feed(new TextEncoder().encode("\x1b[1;4;5;7mA\x1b[22;24;25;27;31mB\x1b[0;31;1;4;5;7mC\x1b[0mD"))
-    for (const col of [0, 1, 2])
+    for (const col of [0, 1, 2]) {
       expect(s.getCell(0, col)).toMatchObject({
         bold: true,
         underline: true,
@@ -306,6 +306,7 @@ describe("Vt100Screen", () => {
         fg: null,
         bg: null,
       })
+    }
     expect(s.getCell(0, 3)).toMatchObject({ bold: false, underline: false, blink: false, inverse: false })
   })
 

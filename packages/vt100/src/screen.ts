@@ -108,8 +108,6 @@ export function createScreen(opts: ScreenOptions): Screen {
   let curX = 0
   let curY = 0
   let curVisible = true
-  let savedCurX = 0
-  let savedCurY = 0
 
   // DECSC/DECRC saved state (cursor + attrs + modes)
   interface SavedState {
@@ -604,8 +602,6 @@ export function createScreen(opts: ScreenOptions): Screen {
     curX = 0
     curY = 0
     curVisible = true
-    savedCurX = 0
-    savedCurY = 0
     savedState = { curX: 0, curY: 0, attrs: resetAttrs(), originMode: false, autoWrap: true }
     attrs = resetAttrs()
     title = ""
