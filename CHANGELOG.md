@@ -1,22 +1,5 @@
 # Changelog
 
-## 0.12.0
-
-- Breaking, vt100.js and vt220.js: ignore CHA, VPA, CNL, CPL, CSI s/u,
-  SU/SD and ED 3. OSC 0/2 no longer set a title; existing OSC string
-  consumption is unchanged. XTWINOPS 18 produces no reply.
-- Breaking, vt100.js: ignore DECTCEM and SGR 22/24/25/27. The accepted
-  SGR set is exactly 0, 1, 4, 5 and 7; use SGR 0 to reset attributes.
-- Breaking, vt220.js: remove standard foreground/background colors
-  (SGR 30–37/40–47), default-color operands (39/49), and conceal/reveal
-  (8/28). The accepted SGR set is exactly 0, 1, 4, 5, 7, 22, 24, 25 and 27.
-  DECTCEM and genuine VT220 insert/delete/selective-erase controls remain.
-- Breaking from 0.11.0, both classic engines: semicolon SGR parameters
-  apply independently rather than consuming later color groups. For example,
-  CSI 38;2;1;4;5m sets bold, underline and blink. Unknown operands are
-  ignored; colon operands remain ignored as a whole.
-- vterm.js behavior is unchanged; its version advances with the shared release.
-
 ## 0.11.0
 
 - Add `Screen.encodePaste(text): Uint8Array` to all three engines using one
