@@ -636,10 +636,10 @@ describe("Vt220Screen", () => {
   })
 })
 
-describe("snapshot / restore (vt220 subset)", () => {
-  const enc2 = new TextEncoder()
-  const feedStr = (screen: Vt220Screen, s: string) => screen.process(enc2.encode(s))
+const enc2 = new TextEncoder()
+const feedStr = (screen: Vt220Screen, s: string) => screen.process(enc2.encode(s))
 
+describe("snapshot / restore (vt220 subset)", () => {
   function scenarioScreen(): Vt220Screen {
     const screen = createVt220Screen({ cols: 20, rows: 4 })
     feedStr(screen, "\x1b]0;my-title\x07")
@@ -790,4 +790,93 @@ test("mode readback distinguishes tracked set/reset from an untracked mode", () 
     expect(screen.getMode(name), `${name} reset`).toBe(false)
   }
   expect(screen.getMode("untracked-mode")).toBeNull()
+})
+
+// @failure Ignored input is reported as handled, invented from discarded syntax, or retained without a bound.
+// @level l0 @consumer Public VT220 diagnostics and the Termless report forwarder.
+describe("ignored OSC commands and SGR operands", () => {
+  test("reports ignored numeric operands beside an applied handled control", () => {
+    const screen = createVt220Screen({ cols: 20, rows: 4 })
+    feedStr(screen, "\x1b[1mA")
+    expect(screen.getUnhandledSequences()).toEqual([])
+    expect(screen.getCell(0, 0).bold).toBe(true)
+    feedStr(screen, "\x1b[3mB")
+    expect(screen.getUnhandledSequences()).toEqual([{ kind: "csi", code: "3m" }])
+    expect(screen.getCell(0, 1).fg).toBeNull()
+    feedStr(screen, "\x1b[1;003;4mC")
+    expect(screen.getCell(0, 2)).toMatchObject({ bold: true, underline: true })
+    expect(screen.getUnhandledSequences()).toEqual([
+      { kind: "csi", code: "3m" },
+      { kind: "csi", code: "3m" },
+    ])
+    // These paths have no retained numeric operand to report; do not reconstruct one.
+    feedStr(screen, "\x1b[4:3;9007199254740992m\x1b[>4;2m\x1b[3$m")
+    expect(screen.getUnhandledSequences()).toHaveLength(2)
+    feedStr(screen, "\x1b[0;1;4;5;7;22;24;25;27m")
+    expect(screen.getUnhandledSequences()).toHaveLength(2)
+  })
+
+  test.each([
+    { name: "BEL across chunks", chunks: ["\x1b]7", "77;private payload", "\x07"], code: "777" },
+    { name: "ST across chunks", chunks: ["\x1b]777;private payload", "\x1b", "\\"], code: "777" },
+    { name: "leading zero command", chunks: ["\x1b]000777;private payload", "\x07"], code: "777" },
+    { name: "command without a payload", chunks: ["\x1b]777", "\x07"], code: "777" },
+    { name: "unsafe command", chunks: ["\x1b]9007199254740992;private payload", "\x07"], code: null },
+    { name: "nonnumeric first field", chunks: ["\x1b]777x;private payload", "\x07"], code: null },
+    { name: "aborted ESC", chunks: ["\x1b]777;private payload", "\x1b["], code: null },
+    { name: "incomplete command", chunks: ["\x1b]777;private payload"], code: null },
+    { name: "overflow", chunks: ["\x1b]777;" + "x".repeat(4097), "\x07"], code: null },
+  ])("reports only a numeric completed OSC: $name", ({ chunks, code }) => {
+    const screen = createVt220Screen({ cols: 20, rows: 4 })
+    // This engine handles no OSC: its applied control is a non-OSC sequence on the same reader.
+    feedStr(screen, "\x1b[1mA")
+    expect(screen.getCell(0, 0).bold).toBe(true)
+    expect(screen.getUnhandledSequences()).toEqual([])
+    for (const chunk of chunks) {
+      expect(screen.getUnhandledSequences()).toEqual([])
+      feedStr(screen, chunk)
+    }
+    expect(screen.getUnhandledSequences()).toEqual(code === null ? [] : [{ kind: "osc", code }])
+    expect(screen.getTitle()).toBe("")
+  })
+
+  test("keeps copied instance history across soft reset and restore, clearing on reset and RIS", () => {
+    const source = createVt220Screen({ cols: 20, rows: 4 })
+    feedStr(source, "\x1b[3m\x1b]777;private payload")
+    const screen = createVt220Screen({ cols: 20, rows: 4 })
+    feedStr(screen, "\x1b[9m")
+    screen.restore(source.snapshot())
+    expect(screen.getUnhandledSequences()).toEqual([{ kind: "csi", code: "9m" }])
+    feedStr(screen, "\x07\x07")
+    const expected = [
+      { kind: "csi", code: "9m" },
+      { kind: "osc", code: "777" },
+    ]
+    expect(screen.getUnhandledSequences()).toEqual(expected)
+    feedStr(screen, "\x1b[!p\x1b[0m")
+    screen.resize(30, 5)
+    expect(screen.getUnhandledSequences()).toEqual(expected)
+    const copy = screen.getUnhandledSequences() as { kind: "osc" | "csi"; code: string }[]
+    copy[0]!.code = "changed"
+    copy.push({ kind: "osc", code: "2" })
+    expect(screen.getUnhandledSequences()).toEqual(expected)
+    expect(source.getUnhandledSequences()).toEqual([{ kind: "csi", code: "3m" }])
+    screen.reset()
+    expect(screen.getUnhandledSequences()).toEqual([])
+    feedStr(screen, "\x1b[3m\x1bc")
+    expect(screen.getUnhandledSequences()).toEqual([])
+  })
+
+  test.each(["osc", "csi"] as const)("bounds %s history by dropping oldest entries in bulk", (kind) => {
+    const screen = createVt220Screen({ cols: 20, rows: 4 })
+    const sequence = (n: number) => (kind === "osc" ? `\x1b]${n};private payload\x07` : `\x1b[${10000 + n}m`)
+    const code = (n: number) => (kind === "osc" ? String(n) : `${10000 + n}m`)
+    feedStr(screen, Array.from({ length: 2000 }, (_, n) => sequence(n)).join(""))
+    expect(screen.getUnhandledSequences()).toHaveLength(2000)
+    feedStr(screen, sequence(2000))
+    const reports = screen.getUnhandledSequences()
+    expect(reports).toHaveLength(1000)
+    expect(reports[0]).toEqual({ kind, code: code(1001) })
+    expect(reports.at(-1)).toEqual({ kind, code: code(2000) })
+  })
 })
