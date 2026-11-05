@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Add `Screen.encodePaste(text): Uint8Array` to all three engines using one
+  private native encoder. Encoding does not mutate the screen or deliver a
+  protocol reply. LF, CR and CRLF are preserved unchanged regardless of LNM.
+- vt100.js and vt220.js always return raw UTF-8: mode 2004 is not implemented
+  and paste is never framed. `getMode("bracketedPaste")` now returns `false`
+  instead of `null`; historical parser and DECRPM reply behavior is unchanged.
+- vterm.js uses its existing native mode 2004. When enabled, all embedded
+  start/end framing markers are removed before wrapping the payload in one
+  bracketed-paste frame. Unbracketed text remains byte-for-byte UTF-8.
+
 ## 0.10.1
 
 - Expose vterm.js alternate-scroll mode through getMode("altScroll"), following the engine's existing DECSET/DECRST 1007 state.

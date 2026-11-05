@@ -11,6 +11,8 @@
  * For truecolor, 256 colors, and wide chars, use vterm.js.
  */
 
+import { encodePaste } from "../../../shared/paste.ts"
+
 // ═══════════════════════════════════════════════════════
 // Internal cell representation
 // ═══════════════════════════════════════════════════════
@@ -74,6 +76,8 @@ export interface Screen {
   readonly cols: number
   readonly rows: number
   process(data: Uint8Array): void
+  /** Encode raw UTF-8 paste without changing screen state or newline bytes. */
+  encodePaste(text: string): Uint8Array
   resize(cols: number, rows: number): void
   reset(): void
   getCell(row: number, col: number): ScreenCell
@@ -809,6 +813,8 @@ export function createScreen(opts: ScreenOptions): Screen {
 
   function getMode(mode: string): boolean | null {
     switch (mode) {
+      case "bracketedPaste":
+        return false
       case "cursorVisible":
         return curVisible
       case "applicationCursor":
@@ -834,6 +840,7 @@ export function createScreen(opts: ScreenOptions): Screen {
       return rows
     },
     process,
+    encodePaste: (text) => encodePaste(text, false),
     resize,
     reset: fullReset,
     getCell,

@@ -33,6 +33,8 @@
  * @see https://github.com/beorn/vterm for the monorepo
  */
 
+import { encodePaste } from "../../../shared/paste.ts"
+
 // ── Types ──────────────────────────────────────────────────────────────
 
 /**
@@ -503,6 +505,8 @@ export interface Screen {
   readonly signals: ScreenSignals
 
   process(data: Uint8Array): void
+  /** Encode UTF-8 paste using this screen's mode 2004; preserve newline bytes. */
+  encodePaste(text: string): Uint8Array
   resize(cols: number, rows: number): void
   /**
    * Apply one {@link TerminalOp} — the single public write entry, symmetric with the journal.
@@ -5780,6 +5784,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       return getSignals()
     },
     process,
+    encodePaste: (text) => encodePaste(text, bracketedPaste),
     resize,
     apply,
     tapOps,

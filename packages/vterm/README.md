@@ -55,6 +55,24 @@ console.log(screen.getText()) // "Hello, Bold World!"
 console.log(screen.getCell(0, 7).bold) // true
 ```
 
+### Paste input
+
+`screen.encodePaste(text)` returns native input as a `Uint8Array` for the
+caller to deliver to the application. It reads that same screen's current
+mode 2004 without processing text, changing screen state, or calling
+`onResponse`.
+
+With bracketed paste disabled, text is preserved byte-for-byte as UTF-8,
+including escape sequences. With mode 2004 enabled (`CSI ? 2004 h`), the
+encoder removes all embedded `ESC[200~` and `ESC[201~` framing markers
+from the payload, then wraps it in `ESC[200~` and `ESC[201~` so pasted
+text cannot end the frame early. Other escape sequences are preserved.
+Empty text still produces a complete frame when enabled. LF, CR and CRLF
+pass through unchanged, regardless of LNM (mode 20).
+
+Reset and snapshot restoration affect paste through the existing native
+mode state. No separate paste state is stored.
+
 ### Cursor shapes
 
 ```typescript

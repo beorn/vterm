@@ -55,6 +55,7 @@ console.log(screen.getCursorPosition()) // { x: 18, y: 0 }
 | Method                         | Description                        |
 | ------------------------------ | ---------------------------------- |
 | `process(data: Uint8Array)`    | Feed raw terminal data             |
+| `encodePaste(text: string)`    | Return native paste as UTF-8 bytes  |
 | `getText()`                    | Get all text (scrollback + screen) |
 | `getTextRange(sr, sc, er, ec)` | Get text in a range                |
 | `getLine(row)`                 | Get cells for a row                |
@@ -68,6 +69,17 @@ console.log(screen.getCursorPosition()) // { x: 18, y: 0 }
 | `scrollViewport(delta)`        | Scroll viewport                    |
 | `resize(cols, rows)`           | Resize terminal                    |
 | `reset()`                      | Reset to initial state             |
+
+### Paste input
+
+`screen.encodePaste(text)` returns a `Uint8Array` without processing text,
+changing screen state, or calling `onResponse`. The caller delivers these
+bytes to the application.
+
+Mode 2004 is not implemented: paste is never framed, including after
+`CSI ? 2004 h`. `getMode("bracketedPaste")` returns `false`. All text is
+preserved as UTF-8, including embedded escape sequences and framing markers.
+LF, CR and CRLF pass through unchanged; LNM never changes paste bytes.
 
 ### Cell properties
 
