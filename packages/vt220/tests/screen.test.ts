@@ -132,93 +132,82 @@ describe("Vt220Screen", () => {
     expect(s.getCursor().x).toBe(2)
   })
 
-  // ── 8 standard colors (VT220 feature) ──
-
-  test("feed ANSI color codes, getCell() has correct fg color", () => {
-    const s = createScreen({ cols: 80, rows: 24 })
-    // SGR 31 = red foreground (ANSI color 1)
-    s.feed(new TextEncoder().encode("\x1b[31mR\x1b[0m"))
-    const cell = s.getCell(0, 0)
-    expect(cell.char).toBe("R")
-    expect(cell.fg).not.toBeNull()
-    expect(cell.fg!.r).toBe(0x80)
-    expect(cell.fg!.g).toBe(0)
-    expect(cell.fg!.b).toBe(0)
+  // R2: former positive color tests promised unsupported extensions.
+  test.each(
+    Array.from({ length: 108 }, (_, code) => code).filter((code) => ![0, 1, 4, 5, 7, 22, 24, 25, 27].includes(code)),
+  )("ignores unsupported SGR %i while applying genuine siblings", (code) => {
+    const s = createScreen({ cols: 20, rows: 2 })
+    s.feed(new TextEncoder().encode("\x1b[1;4;5;7m\x1b[" + code + "mX"))
+    expect(s.getCell(0, 0)).toMatchObject({
+      char: "X",
+      bold: true,
+      underline: true,
+      blink: true,
+      inverse: true,
+      hidden: false,
+      fg: null,
+      bg: null,
+    })
   })
 
-  test("feed text with background color, getCell() has correct bg", () => {
-    const s = createScreen({ cols: 80, rows: 24 })
-    // SGR 42 = green background (ANSI color 2)
-    s.feed(new TextEncoder().encode("\x1b[42mG\x1b[0m"))
-    const cell = s.getCell(0, 0)
-    expect(cell.char).toBe("G")
-    expect(cell.bg).not.toBeNull()
-    expect(cell.bg!.r).toBe(0)
-    expect(cell.bg!.g).toBe(0x80)
-    expect(cell.bg!.b).toBe(0)
+  // R1: DEC positive controls below do not cover rejected extension commands.
+  test.each(["5G", "5d", "2E", "2F", "S", "T", "3J", "u"])("ignores non-VT220 CSI %s", (sequence) => {
+    const s = createScreen({ cols: 10, rows: 4 })
+    s.feed(new TextEncoder().encode("ONE\r\nTWO\x1b[3;4H"))
+    const before = s.getText()
+    s.feed(new TextEncoder().encode("\x1b[" + sequence))
+    expect(s.getCursor()).toMatchObject({ x: 3, y: 2 })
+    expect(s.getText()).toBe(before)
   })
 
-  test("all 8 standard foreground colors", () => {
-    const s = createScreen({ cols: 80, rows: 24 })
-    for (let i = 0; i < 8; i++) {
-      s.feed(new TextEncoder().encode(`\x1b[${30 + i}mX`))
-    }
-    const black = s.getCell(0, 0)
-    expect(black.fg).not.toBeNull()
-    expect(black.fg!.r).toBe(0)
-    expect(black.fg!.g).toBe(0)
-    expect(black.fg!.b).toBe(0)
-
-    const white = s.getCell(0, 7)
-    expect(white.fg).not.toBeNull()
-    expect(white.fg!.r).toBe(0xc0)
-    expect(white.fg!.g).toBe(0xc0)
-    expect(white.fg!.b).toBe(0xc0)
+  test("CSI s does not overwrite the DEC saved cursor", () => {
+    const s = createScreen({ cols: 10, rows: 4 })
+    s.feed(new TextEncoder().encode("\x1b[2;3H\x1b7\x1b[3;4H\x1b[s\x1b8"))
+    expect(s.getCursor()).toMatchObject({ x: 2, y: 1 })
   })
 
-  test("all 8 standard background colors", () => {
-    const s = createScreen({ cols: 80, rows: 24 })
-    for (let i = 0; i < 8; i++) {
-      s.feed(new TextEncoder().encode(`\x1b[${40 + i}mX`))
-    }
-    const black = s.getCell(0, 0)
-    expect(black.bg).not.toBeNull()
-    expect(black.bg!.r).toBe(0)
-
-    const white = s.getCell(0, 7)
-    expect(white.bg).not.toBeNull()
-    expect(white.bg!.r).toBe(0xc0)
+  test("XTWINOPS 18 sends no response and following DSR/CPR recover", () => {
+    const onResponse = vi.fn()
+    const s = createScreen({ cols: 10, rows: 4, onResponse })
+    s.feed(new TextEncoder().encode("\x1b[2;3H\x1b[18t"))
+    expect(onResponse).not.toHaveBeenCalled()
+    s.feed(new TextEncoder().encode("\x1b[5n\x1b[6n"))
+    expect(onResponse.mock.calls).toEqual([["\x1b[0n"], ["\x1b[2;3R"]])
   })
 
-  test("SGR 39 resets foreground to default", () => {
-    const s = createScreen({ cols: 80, rows: 24 })
-    s.feed(new TextEncoder().encode("\x1b[31mR\x1b[39mN"))
-    const red = s.getCell(0, 0)
-    expect(red.fg).not.toBeNull()
-    const normal = s.getCell(0, 1)
-    expect(normal.fg).toBeNull()
+  test.each([0, 2])("OSC %i consumes its string without setting a title", (code) => {
+    const s = createScreen({ cols: 20, rows: 2 })
+    s.feed(new TextEncoder().encode("A\x1b]" + code + ";title\x07B"))
+    expect(s.getTitle()).toBe("")
+    expect(s.getText().trim()).toBe("AB")
   })
 
-  test("SGR 49 resets background to default", () => {
-    const s = createScreen({ cols: 80, rows: 24 })
-    s.feed(new TextEncoder().encode("\x1b[41mR\x1b[49mN"))
-    const red = s.getCell(0, 0)
-    expect(red.bg).not.toBeNull()
-    const normal = s.getCell(0, 1)
-    expect(normal.bg).toBeNull()
+  test.each([22, 24, 25, 27, 0])("preserves VT220 rendition reset %i", (code) => {
+    const s = createScreen({ cols: 20, rows: 2 })
+    s.feed(new TextEncoder().encode("\x1b[1;4;5;7mA\x1b[" + code + "mB"))
+    expect(s.getCell(0, 0)).toMatchObject({ bold: true, underline: true, blink: true, inverse: true })
+    expect(s.getCell(0, 1)).toMatchObject({
+      bold: code !== 0 && code !== 22,
+      underline: code !== 0 && code !== 24,
+      blink: code !== 0 && code !== 25,
+      inverse: code !== 0 && code !== 27,
+    })
   })
-
   // ── Text attributes ──
 
-  // Unsupported underline colours must consume operands without executing them as SGR codes.
+  // R2: each semicolon operand is independent, including former extended-color payloads.
   test.each([
-    ["58;5;1", false, false, false],
-    ["58;2;1;2;3", false, false, false],
-    ["58;5;1;25", false, false, false],
-    ["1;58;5;5;4", true, false, true],
+    ["58;5;1", true, true, false],
+    ["58;2;1;2;3", true, false, false],
+    ["58;5;1;25", true, false, false],
+    ["1;58;5;5;4", true, true, true],
     ["58;5;1;1;5;4", true, true, true],
     ["1;4;5;59", true, true, true],
-  ] as const)("isolates unsupported SGR operands in %s", (params, bold, blink, underline) => {
+    ["38;2;1;4;5", true, true, true],
+    ["48;5;1;4", true, true, true],
+    ["38;2;1", true, false, false],
+    ["48;5", false, true, false],
+  ] as const)("applies genuine SGR operands independently in %s", (params, bold, blink, underline) => {
     const s = createScreen({ cols: 80, rows: 2 })
     s.feed(new TextEncoder().encode(`\x1b[${params}mX`))
     expect(s.getCell(0, 0)).toMatchObject({ char: "X", bold, blink, underline, fg: null, bg: null })
@@ -249,7 +238,7 @@ describe("Vt220Screen", () => {
       const s = createScreen({ cols: 80, rows: 2 })
       s.feed(bytes.slice(0, split))
       s.feed(bytes.slice(split))
-      expect(s.getTitle(), `split=${split}`).toBe("prior")
+      expect(s.getTitle(), `split=${split}`).toBe("")
       expect(s.getText().trim(), `split=${split}`).toBe("Y")
     }
   })
@@ -263,7 +252,7 @@ describe("Vt220Screen", () => {
       const restored = createVt220Screen({ cols: 80, rows: 2 })
       restored.restore(JSON.parse(JSON.stringify(s.snapshot())) as Vt220ScreenSnapshot)
       restored.process(new TextEncoder().encode(`${pendingEscape ? "" : "\x1b"}\\Y`))
-      expect(restored.getTitle(), `pendingEscape=${pendingEscape}`).toBe("prior")
+      expect(restored.getTitle(), `pendingEscape=${pendingEscape}`).toBe("")
       expect(restored.getText().trim(), `pendingEscape=${pendingEscape}`).toBe("Y")
     }
   })
@@ -288,14 +277,14 @@ describe("Vt220Screen", () => {
       }
     }
     for (const [params, underline, bold, fg] of [
-      ["1;4:3;31", false, true, { r: 0x80, g: 0, b: 0 }],
+      ["1;4:3;31", false, true, null],
       ["4:3;1", false, true, null],
       ["4;4:3", true, false, null],
       ["4;4:3;24", false, false, null],
       ["4;0", false, false, null],
       ["4;", false, false, null],
       ["1;38:2::1:2:3;4", true, true, null],
-      ["38;2;1;2;3;4", true, false, null],
+      ["38;2;1;2;3;4", true, true, null],
     ] as const) {
       s.reset()
       s.feed(new TextEncoder().encode(`\x1b[${params}mX`))
@@ -315,20 +304,19 @@ describe("Vt220Screen", () => {
     expect(s.getCell(0, 0).inverse).toBe(true)
   })
 
-  test("hidden/conceal attribute (SGR 8/28)", () => {
+  test("hidden/conceal operands are ignored (SGR 8/28)", () => {
     const s = createScreen({ cols: 80, rows: 24 })
     s.feed(new TextEncoder().encode("\x1b[8mH\x1b[28mV"))
-    expect(s.getCell(0, 0).hidden).toBe(true)
+    expect(s.getCell(0, 0).hidden).toBe(false)
     expect(s.getCell(0, 1).hidden).toBe(false)
   })
 
-  test("combined bold + color attributes", () => {
+  test("mixed genuine bold and unsupported color keeps bold only", () => {
     const s = createScreen({ cols: 80, rows: 24 })
     s.feed(new TextEncoder().encode("\x1b[1;31mX\x1b[0m"))
     const cell = s.getCell(0, 0)
     expect(cell.bold).toBe(true)
-    expect(cell.fg).not.toBeNull()
-    expect(cell.fg!.r).toBe(0x80)
+    expect(cell.fg).toBeNull()
   })
 
   // ── Insert mode (IRM) — VT220 feature ──
@@ -629,7 +617,7 @@ describe("Vt220Screen", () => {
 
   // ── Forward compatibility ──
 
-  test("256-color and truecolor SGR sequences are silently ignored", () => {
+  test("later color syntax cannot set a VT220 foreground color", () => {
     const s = createScreen({ cols: 80, rows: 24 })
     s.feed(new TextEncoder().encode("\x1b[38;5;208mX\x1b[0m"))
     s.feed(new TextEncoder().encode("\x1b[38;2;100;200;50mY\x1b[0m"))
@@ -670,7 +658,7 @@ describe("snapshot / restore (vt220 subset)", () => {
 
     expect(restored.getText()).toBe(original.getText())
     expect(restored.getCursorPosition()).toEqual(original.getCursorPosition())
-    expect(restored.getTitle()).toBe("my-title")
+    expect(restored.getTitle()).toBe("")
     expect(restored.getScrollbackLength()).toBe(original.getScrollbackLength())
     for (const mode of ["originMode", "insertMode", "autoWrap", "reverseVideo"]) {
       expect(restored.getMode(mode)).toBe(original.getMode(mode))

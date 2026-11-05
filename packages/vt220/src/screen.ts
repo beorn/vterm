@@ -1,12 +1,12 @@
 /**
  * Pure TypeScript VT220 terminal emulator.
  *
- * Extends VT100 with VT220 features: 8 standard colors (SGR 30-37/40-47),
- * insert/replace mode (IRM), insert/delete characters (ICH/DCH),
+ * Extends VT100 with VT220 features: insert/replace mode (IRM),
+ * insert/delete characters (ICH/DCH),
  * insert/delete lines (IL/DL), erase characters (ECH), selective erase
- * (DECSED/DECSEL), hidden/conceal (SGR 8/28), and soft reset (DECSTR).
+ * (DECSED/DECSEL), individual rendition resets, and soft reset (DECSTR).
  *
- * Zero dependencies. No truecolor, no 256 colors, no wide chars —
+ * Zero dependencies. Monochrome, no wide chars —
  * those belong in vterm.js.
  */
 
@@ -48,21 +48,6 @@ const EMPTY_CELL: ScreenCell = Object.freeze({
 function emptyCell(): ScreenCell {
   return { ...EMPTY_CELL }
 }
-
-// ═══════════════════════════════════════════════════════
-// ANSI 8-color palette (standard VT220 colors)
-// ═══════════════════════════════════════════════════════
-
-const ANSI_8: readonly CellColor[] = [
-  { r: 0x00, g: 0x00, b: 0x00 }, // 0  Black
-  { r: 0x80, g: 0x00, b: 0x00 }, // 1  Red
-  { r: 0x00, g: 0x80, b: 0x00 }, // 2  Green
-  { r: 0x80, g: 0x80, b: 0x00 }, // 3  Yellow
-  { r: 0x00, g: 0x00, b: 0x80 }, // 4  Blue
-  { r: 0x80, g: 0x00, b: 0x80 }, // 5  Magenta
-  { r: 0x00, g: 0x80, b: 0x80 }, // 6  Cyan
-  { r: 0xc0, g: 0xc0, b: 0xc0 }, // 7  White
-]
 
 // ═══════════════════════════════════════════════════════
 // Screen
@@ -326,20 +311,6 @@ export function createScreen(opts: ScreenOptions): Screen {
         curX -= Math.max(parts[0] ?? 1, 1)
         clampCursor()
         break
-      case "E": // CNL - Cursor Next Line
-        curY += Math.max(parts[0] ?? 1, 1)
-        curX = 0
-        clampCursor()
-        break
-      case "F": // CPL - Cursor Previous Line
-        curY -= Math.max(parts[0] ?? 1, 1)
-        curX = 0
-        clampCursor()
-        break
-      case "G": // CHA - Cursor Horizontal Absolute
-        curX = (parts[0] ?? 1) - 1
-        clampCursor()
-        break
       case "H": // CUP - Cursor Position
       case "f": // HVP - same as CUP
         curY = (parts[0] ?? 1) - 1
@@ -366,20 +337,6 @@ export function createScreen(opts: ScreenOptions): Screen {
         break
       case "X": // ECH - Erase Characters
         handleEraseChars(Math.max(parts[0] ?? 1, 1))
-        break
-      case "S": // SU - Scroll Up
-        for (let i = 0; i < Math.max(parts[0] ?? 1, 1); i++) {
-          scrollUp(scrollTop, scrollBottom)
-        }
-        break
-      case "T": // SD - Scroll Down
-        for (let i = 0; i < Math.max(parts[0] ?? 1, 1); i++) {
-          scrollDown(scrollTop, scrollBottom)
-        }
-        break
-      case "d": // VPA - Line Position Absolute
-        curY = (parts[0] ?? 1) - 1
-        clampCursor()
         break
       case "m": // SGR - Select Graphic Rendition
         handleSGR(params)
@@ -415,15 +372,6 @@ export function createScreen(opts: ScreenOptions): Screen {
             onResponse("\x1b[?62;1;2;6;7;8;9c")
           }
         }
-        break
-      case "s": // SCP - Save Cursor Position
-        savedCurX = curX
-        savedCurY = curY
-        break
-      case "u": // RCP - Restore Cursor Position
-        curX = savedCurX
-        curY = savedCurY
-        clampCursor()
         break
       default:
         // Unknown CSI sequence — ignore
@@ -521,12 +469,8 @@ export function createScreen(opts: ScreenOptions): Screen {
         eraseCells(curY, 0, curY, curX)
         break
       case 2: // Erase entire display
-      case 3: // Erase entire display + scrollback
         for (let row = 0; row < rows; row++) {
           eraseCells(row, 0, row, cols - 1)
-        }
-        if (mode === 3) {
-          scrollback.length = 0
         }
         break
     }
@@ -620,9 +564,7 @@ export function createScreen(opts: ScreenOptions): Screen {
       return
     }
 
-    let i = 0
-    while (i < params.length) {
-      const code = params[i]!
+    for (const code of params) {
       switch (code) {
         case 0:
           attrs = resetAttrs()
@@ -639,9 +581,6 @@ export function createScreen(opts: ScreenOptions): Screen {
         case 7:
           attrs.inverse = true
           break
-        case 8: // Hidden/conceal
-          attrs.hidden = true
-          break
         case 22: // Normal intensity (turn off bold)
           attrs.bold = false
           break
@@ -654,68 +593,7 @@ export function createScreen(opts: ScreenOptions): Screen {
         case 27:
           attrs.inverse = false
           break
-        case 28: // Reveal (turn off hidden/conceal)
-          attrs.hidden = false
-          break
-        // Foreground colors 30-37
-        case 30:
-        case 31:
-        case 32:
-        case 33:
-        case 34:
-        case 35:
-        case 36:
-        case 37:
-          attrs.fg = { ...ANSI_8[code - 30]! }
-          break
-        case 39: // Default foreground
-          attrs.fg = null
-          break
-        // Background colors 40-47
-        case 40:
-        case 41:
-        case 42:
-        case 43:
-        case 44:
-        case 45:
-        case 46:
-        case 47:
-          attrs.bg = { ...ANSI_8[code - 40]! }
-          break
-        case 49: // Default background
-          attrs.bg = null
-          break
-        // Skip extended color sequences (not supported, but must consume params)
-        case 38:
-        case 48:
-        case 58:
-          if (i + 1 < params.length && params[i + 1] === 2) {
-            i += 4 // skip 38;2;R;G;B or 48;2;R;G;B
-          } else if (i + 1 < params.length && params[i + 1] === 5) {
-            i += 2 // skip 38;5;N or 48;5;N
-          }
-          break
       }
-      i++
-    }
-  }
-
-  // ── OSC handler ──
-
-  function handleOSC(oscString: string): void {
-    const semicolonIdx = oscString.indexOf(";")
-    if (semicolonIdx === -1) return
-
-    const code = parseInt(oscString.substring(0, semicolonIdx), 10)
-    const value = oscString.substring(semicolonIdx + 1)
-
-    switch (code) {
-      case 0: // Set icon name and window title
-      case 2: // Set window title
-        title = value
-        break
-      case 1: // Set icon name (ignore)
-        break
     }
   }
 
@@ -876,7 +754,6 @@ export function createScreen(opts: ScreenOptions): Screen {
         case "osc":
           if (code === 0x07) {
             // BEL terminates OSC
-            handleOSC(oscBuf)
             parserState = "ground"
           } else if (code === 0x1b) {
             // ESC might be start of ST (\x1b\\)
@@ -890,11 +767,7 @@ export function createScreen(opts: ScreenOptions): Screen {
           break
 
         case "oscString":
-          if (ch === "\\") {
-            // ST (String Terminator) — end of OSC
-            handleOSC(oscBuf)
-          }
-          // Either way, back to ground
+          // ST or any other byte ends the existing OSC consumption.
           parserState = "ground"
           break
 

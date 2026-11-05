@@ -21,5 +21,13 @@ Mode 2004 is not implemented: paste is never framed, including after
 preserved as UTF-8, including embedded escape sequences and framing markers.
 LF, CR and CRLF pass through unchanged; LNM never changes paste bytes.
 
-Existing VT220 parser and device-reply behavior is unchanged. Snapshots retain
-the historical mode set; paste encoding adds no stored state.
+Rendition is monochrome. SGR accepts exactly 0, 1, 4, 5, 7, 22, 24, 25 and 27. Other semicolon parameters are ignored independently: `CSI 1;31m` sets
+bold without color; `CSI 38;2;1;4;5m` sets bold, underline and blink. A colon
+parameter such as `38:2::1:2:3` is ignored as a whole.
+
+CHA, VPA, CNL, CPL, CSI s/u, SU/SD and ED 3 are ignored. XTWINOPS 18 sends
+no reply. OSC strings retain their existing consumption behavior but do not
+set a title. DEC cursor save/restore (ESC 7/8), IND/NEL/RI, DECAWM, DECTCEM,
+insert/delete operations and selective erase remain available.
+
+Snapshots retain the historical mode set; paste encoding adds no stored state.
