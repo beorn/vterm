@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.11.0
 
 - Add `Screen.encodePaste(text): Uint8Array` to all three engines using one
   private native encoder. Encoding does not mutate the screen or deliver a
@@ -11,6 +11,16 @@
 - vterm.js uses its existing native mode 2004. When enabled, all embedded
   start/end framing markers are removed before wrapping the payload in one
   bracketed-paste frame. Unbracketed text remains byte-for-byte UTF-8.
+
+- vterm.js `process()` now rejects strings at its byte-only boundary. Pass a
+  `Uint8Array`, encoding text with `TextEncoder` before calling it.
+- Isolate unsupported classic SGR parameters and control strings so vt100.js
+  and vt220.js preserve their existing attributes and parser state.
+- Keep vterm.js mouse tracking and mouse encoding state independent.
+- Keep DEC private mode 4 separate from ANSI insert mode in all three engines.
+- Answer the official vterm.js Capabilities query.
+- Advance tabs to the right margin after all tab stops have been cleared.
+- Strip embedded paste markers in one linear pass.
 
 ## 0.10.1
 
