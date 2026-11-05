@@ -46,6 +46,8 @@ const EMPTY_CELL: ScreenCell = Object.freeze({
   hidden: false,
 })
 
+const UNHANDLED_SEQUENCE_LIMIT = 1000
+
 function emptyCell(): ScreenCell {
   return { ...EMPTY_CELL }
 }
@@ -80,6 +82,7 @@ export interface Screen {
   encodePaste(text: string): Uint8Array
   resize(cols: number, rows: number): void
   reset(): void
+  getUnhandledSequences(): readonly { readonly kind: "osc" | "csi"; readonly code: string }[]
   getCell(row: number, col: number): ScreenCell
   getLine(row: number): ScreenCell[]
   getScrollbackLine(row: number): ScreenCell[]
@@ -95,6 +98,7 @@ export interface Screen {
 }
 
 export function createScreen(opts: ScreenOptions): Screen {
+  const unhandledSequences: { kind: "osc" | "csi"; code: string }[] = []
   let cols = opts.cols
   let rows = opts.rows
   const scrollbackLimit = opts.scrollbackLimit ?? 1000
@@ -426,9 +430,23 @@ export function createScreen(opts: ScreenOptions): Screen {
         case 7:
           attrs.inverse = true
           break
-        // The VT100 operand set is closed: all other values are ignored.
+        default:
+          recordUnhandled("csi", code)
       }
     }
+  }
+
+  function recordUnhandled(kind: "osc" | "csi", code: number): void {
+    if (!Number.isSafeInteger(code) || code < 0) return
+    unhandledSequences.push({ kind, code: String(code) + (kind === "csi" ? "m" : "") })
+    if (unhandledSequences.length > UNHANDLED_SEQUENCE_LIMIT * 2) {
+      unhandledSequences.splice(0, unhandledSequences.length - UNHANDLED_SEQUENCE_LIMIT)
+    }
+  }
+
+  function recordUnhandledOsc(): void {
+    const command = /^(\d+)(?:;|$)/.exec(oscBuf)?.[1]
+    if (command !== undefined) recordUnhandled("osc", Number(command))
   }
 
   // ── Main parser ──
@@ -568,6 +586,7 @@ export function createScreen(opts: ScreenOptions): Screen {
         case "osc":
           if (code === 0x07) {
             // BEL terminates OSC
+            recordUnhandledOsc()
             parserState = "ground"
           } else if (code === 0x1b) {
             // ESC might be start of ST (\x1b\\)
@@ -582,6 +601,7 @@ export function createScreen(opts: ScreenOptions): Screen {
 
         case "oscString":
           // ST terminates OSC; other bytes keep the existing return-to-ground behavior.
+          if (ch === "\\") recordUnhandledOsc()
           parserState = "ground"
           break
 
@@ -597,6 +617,7 @@ export function createScreen(opts: ScreenOptions): Screen {
   }
 
   function fullReset(): void {
+    unhandledSequences.length = 0
     grid = makeGrid(cols, rows)
     scrollback = []
     curX = 0
@@ -744,6 +765,7 @@ export function createScreen(opts: ScreenOptions): Screen {
     encodePaste: (text) => encodePaste(text, false),
     resize,
     reset: fullReset,
+    getUnhandledSequences: () => unhandledSequences.map((entry) => ({ ...entry })),
     getCell,
     getLine,
     getScrollbackLine,

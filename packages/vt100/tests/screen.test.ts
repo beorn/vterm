@@ -61,6 +61,76 @@ function createScreen(opts: {
 }
 
 describe("Vt100Screen", () => {
+  // @failure Ignored input cannot be distinguished from absent evidence, or mutates retained history.
+  // @level l0
+  // @consumer Public VT100 report readers, including the Termless adapter.
+  test("reports only native ignored SGR operands with copied reset-scoped history", () => {
+    const screen = createVt100Screen({ cols: 12, rows: 2 })
+    const feed = (text: string) => screen.process(new TextEncoder().encode(text))
+    feed("\x1b[1mA")
+    expect(screen.getCell(0, 0).bold).toBe(true)
+    expect(screen.getUnhandledSequences()).toEqual([])
+    feed("\x1b[1;3;4mB\x1b[4:3m\x1b[9007199254740992m\x1b[-3m\x1b[>4;2m")
+    expect(screen.getCell(0, 1)).toMatchObject({ bold: true, underline: true })
+    const expected = [
+      { kind: "csi", code: "3m" },
+      { kind: "csi", code: "2m" },
+    ]
+    expect(screen.getUnhandledSequences()).toEqual(expected)
+    const copy = screen.getUnhandledSequences() as { kind: "osc" | "csi"; code: string }[]
+    copy[0]!.code = "changed"
+    copy.push({ kind: "osc", code: "777" })
+    feed("\x1b[0m")
+    expect(screen.getUnhandledSequences()).toEqual(expected)
+    screen.reset()
+    expect(screen.getUnhandledSequences()).toEqual([])
+    feed("\x1b[3m\x1bc")
+    expect(screen.getUnhandledSequences()).toEqual([])
+  })
+
+  // @failure Aborted, oversized or ambiguous OSC input is mislabeled as an ignored command.
+  // @level l0
+  // @consumer Public identifier-only report consumers; payload never appears in reports.
+  test.each([
+    [["\x1b]000777;private-payload\x07"], [{ kind: "osc", code: "777" }]],
+    [["\x1b]2;private", "-payload\x1b", "\\"], [{ kind: "osc", code: "2" }]],
+    [["\x1b]9\x07"], [{ kind: "osc", code: "9" }]],
+    [["\x1b]777x;payload\x07"], []],
+    [["\x1b]9007199254740992;payload\x07"], []],
+    [[`\x1b]${"9".repeat(300)};payload\x07`], []],
+    [["\x1b]9;partial"], []],
+    [["\x1b]9;aborted\x1bX"], []],
+    [[`\x1b]9;${"x".repeat(4096)}\x07`], []],
+  ])("reports only complete OSC numeric commands (case %#)", (chunks, expected) => {
+    const screen = createVt100Screen({ cols: 12, rows: 2 })
+    screen.process(new TextEncoder().encode("\x1b[1mA"))
+    expect(screen.getCell(0, 0).bold).toBe(true)
+    expect(screen.getUnhandledSequences()).toEqual([])
+    for (const chunk of chunks as string[]) screen.process(new TextEncoder().encode(chunk))
+    expect(screen.getUnhandledSequences()).toEqual(expected)
+    expect(screen.getTitle()).toBe("")
+  })
+
+  // @failure Ordinary coloured output grows the public report without bound or loses newest entries.
+  // @level l0
+  // @consumer Long-lived public Screen instances.
+  test("bulk trims oldest reports while preserving at least the newest 1000", () => {
+    const screen = createVt100Screen({ cols: 12, rows: 2 })
+    const feed = (start: number, end: number) =>
+      screen.process(
+        new TextEncoder().encode(Array.from({ length: end - start }, (_, i) => `\x1b[${10000 + start + i}m`).join("")),
+      )
+    feed(0, 2001)
+    expect(screen.getUnhandledSequences()).toHaveLength(1000)
+    expect(screen.getUnhandledSequences()[0]).toEqual({ kind: "csi", code: "11001m" })
+    feed(2001, 3001)
+    expect(screen.getUnhandledSequences()).toHaveLength(2000)
+    feed(3001, 3002)
+    expect(screen.getUnhandledSequences()).toHaveLength(1000)
+    expect(screen.getUnhandledSequences()[0]).toEqual({ kind: "csi", code: "12002m" })
+    expect(screen.getUnhandledSequences().at(-1)).toEqual({ kind: "csi", code: "13001m" })
+  })
+
   // ── Lifecycle ──
 
   test("creates screen with specified dimensions", () => {

@@ -73,6 +73,24 @@ console.log(screen.getCursorPosition()) // { x: 18, y: 0 }
 | `scrollViewport(delta)`        | Scroll viewport                       |
 | `resize(cols, rows)`           | Resize terminal                       |
 | `reset()`                      | Reset to initial state                |
+| `getUnhandledSequences()`      | Copy ignored OSC identifiers and SGR operands |
+
+### Ignored-sequence reports
+
+`getUnhandledSequences()` returns copied, ordered `{ kind: "osc" | "csi", code: string }`
+entries. OSC reports contain only the decimal command number after a complete BEL
+or ST terminator, never its payload. Ignored SGR operands contain their native
+decimal value and `m`, such as `3m`. Codes must be non-negative safe integers.
+Colon groups, invalid or oversized numbers, incomplete/overflowed OSC strings and
+malformed terminators produce no entry. Missing entries prove no support outcome.
+
+This is an operand report, not a copy of input syntax. The existing SGR parser also
+receives prefixed input: `CSI > 4 ; 2 m` reports `2m`; partial numeric parsing such
+as `CSI 3 $ m` reports `3m`. Reporting does not change how that input is handled.
+
+History keeps at least the most recent 1000 entries. When it grows past 2000, it
+drops the oldest entries back to 1000. Each getter result copies its entries;
+`reset()` and RIS clear history, while SGR 0 does not. A new screen starts empty.
 
 ### Paste input
 
