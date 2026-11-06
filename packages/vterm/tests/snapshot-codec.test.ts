@@ -68,6 +68,17 @@ describe("snapshot-codec — ordinary mode and SGR continuation", () => {
     expect(restored.getCell(1, 0).bold).toBe(false)
     expect(restored.getMode("smoothScroll")).toBe(false)
     expect(Object.hasOwn(restored.snapshot(), "sgrStack")).toBe(false)
+    feed(source, "\x1b[?40l")
+    const closed = roundTrip(source.snapshot())
+    restored.restore(closed)
+    feed(restored, "\x1b[?3h")
+    expect(restored.cols).toBe(8)
+    Reflect.deleteProperty(closed.modes, "allowColumnSwitch")
+    restored.restore(roundTrip(closed))
+    feed(restored, "\x1b[?3h")
+    expect(restored.cols).toBe(132)
+    Reflect.set(closed.modes, "allowColumnSwitch", "invalid")
+    expect(() => restored.restore(closed)).toThrow(/allowColumnSwitch/)
   })
 
   test("limits SGR stack depth and rejects over-depth snapshots before mutation", () => {

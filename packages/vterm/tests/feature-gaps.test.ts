@@ -383,6 +383,16 @@ describe("new mode tracking", () => {
     expect(screen.cols).toBe(80)
     expect(screen.getCursor()).toMatchObject({ row: 0, col: 0 })
     expect(screen.getCell(0, 0).char).toBe("")
+    feed("KEEP\x1b[?40l\x1b[?3h")
+    expect(screen.cols).toBe(80)
+    expect(screen.getCell(0, 0).char).toBe("K")
+    feed("\x1b[?40s\x1b[?40h\x1b[?3h\x1b[?40r\x1b[?3l")
+    expect(screen.cols).toBe(132)
+    feed("\x1b[?40h\x1b[?3l\x1b[?40l\x1b[!p\x1b[?3h")
+    expect(screen.cols).toBe(132)
+    screen.reset()
+    feed("\x1b[?3l")
+    expect(screen.cols).toBe(80)
   })
 
   test("?1005 utf8 mouse — trackable via DECRPM", () => {
