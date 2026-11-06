@@ -2839,6 +2839,40 @@ describe("XTSAVE / XTRESTORE (CSI ? Pm s / CSI ? Pm r) and non-DECSET/DECRST pri
     expect(screen.getMode("autoWrap")).toBe(true)
   })
 
+  test("XTRESTORE skips unchanged modes: restoring ?3 (DECCOLM) at its current state does not wipe the screen", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 4 })
+    const encoder = new TextEncoder()
+    screen.process(encoder.encode("hello\x1b[?3s\x1b[?3r"))
+    expect(screen.getText().split("\n")[0]).toBe("hello")
+  })
+
+  test("XTRESTORE skips unchanged mouse mode: ?1000 saved off, ?1002 set, ?1000r leaves ?1002 on", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ cols: 20, rows: 4, onResponse: (s) => responses.push(s) })
+    const encoder = new TextEncoder()
+    screen.process(encoder.encode("\x1b[?1000s\x1b[?1002h\x1b[?1000r\x1b[?1002$p"))
+    expect(screen.getMode("mouseTracking")).toBe(true)
+    expect(responses).toEqual(["\x1b[?1002;1$y"])
+  })
+
+  test("unrecognized mode ?9999s/?9999r is a no-op, ?1048 has no saved boolean state, and reset() clears saved modes", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ cols: 20, rows: 4, onResponse: (s) => responses.push(s) })
+    const encoder = new TextEncoder()
+
+    // Unrecognized ?9999s then ?9999r saves nothing and is a no-op; ?1048$p still reports 2
+    screen.process(encoder.encode("\x1b[?7h\x1b[?9999s\x1b[?9999r\x1b[?9999$p\x1b[?1048$p"))
+    expect(screen.getMode("autoWrap")).toBe(true)
+    expect(responses).toEqual(["\x1b[?9999;0$y", "\x1b[?1048;2$y"])
+
+    // Save ?7l (off), reset screen (autoWrap returns to true and savedPrivateModes clears), then ?7r stays true
+    screen.process(encoder.encode("\x1b[?7l\x1b[?7s"))
+    screen.reset()
+    expect(screen.getMode("autoWrap")).toBe(true)
+    screen.process(encoder.encode("\x1b[?7r"))
+    expect(screen.getMode("autoWrap")).toBe(true)
+  })
+
   test("unhandled private CSI final bytes or intermediates do not reset DEC private modes", () => {
     const screen = createVtermScreen({ cols: 20, rows: 4 })
     const encoder = new TextEncoder()
@@ -2851,4 +2885,3 @@ describe("XTSAVE / XTRESTORE (CSI ? Pm s / CSI ? Pm r) and non-DECSET/DECRST pri
     expect(screen.getMode("autoWrap")).toBe(true)
   })
 })
-

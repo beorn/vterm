@@ -1307,6 +1307,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let decColumnMode = false // ?3 — DECCOLM (80/132 columns). We don't switch width, just track.
   let altScrollMode = false // ?1007
   let utf8MouseMode = false // ?1005
+  // Kept outside Snapshot: a restored snapshot starts with nothing saved.
+  const savedPrivateModes = new Map<number, boolean>()
 
   // Color state — mutable palette & OSC 4/5/10-19 color setters
   let palette256: Color[] = buildPalette256()
@@ -2827,11 +2829,187 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
   }
 
+  function privateModeState(mode: number): boolean | null {
+    switch (mode) {
+      case 1:
+        return applicationCursor
+      case 6:
+        return originMode
+      case 7:
+        return autoWrap
+      case 25:
+        return curVisible
+      case 47:
+      case 1047:
+      case 1049:
+        return useAltScreen
+      case 66:
+        return applicationKeypad
+      case 9:
+      case 1000:
+      case 1002:
+      case 1003:
+        return mouseTrackingMode === mode
+      case 1015:
+        return urxvtMouse
+      case 1016:
+        return pixelMouse
+      case 1004:
+        return focusTracking
+      case 1006:
+        return sgrMouse
+      case 2004:
+        return bracketedPaste
+      case 2026:
+        return syncOutput
+      case 69:
+        return leftRightMarginMode
+      case 2031:
+        return colorSchemeReporting
+      case 5:
+        return reverseVideo
+      case 20:
+        return newLineMode
+      case 3:
+        return decColumnMode
+      case 1005:
+        return utf8MouseMode
+      case 1007:
+        return altScrollMode
+      default:
+        return null
+    }
+  }
+
+  function applyPrivateMode(code: number, set: boolean): void {
+    switch (code) {
+      case 1: // DECCKM - Application Cursor
+        applicationCursor = set
+        break
+      case 5: // DECSCNM - Reverse Video
+        reverseVideo = set
+        break
+      case 6: // DECOM - Origin Mode
+        originMode = set
+        break
+      case 7: // DECAWM - Autowrap Mode
+        autoWrap = set
+        break
+      case 25: // DECTCEM - Cursor Visible
+        curVisible = set
+        break
+      case 47: // Alternate screen buffer (old)
+      case 1047: // Alternate screen buffer
+        if (set && !useAltScreen) {
+          useAltScreen = true
+          grid = altGrid
+          softWrapped = altSoftWrapped
+          lineAttrs = altLineAttrs
+          markAllDirty() // whole visible buffer swapped
+        } else if (!set && useAltScreen) {
+          useAltScreen = false
+          grid = mainGrid
+          softWrapped = mainSoftWrapped
+          lineAttrs = mainLineAttrs
+          markAllDirty()
+        }
+        break
+      case 66: // DECNKM - Application Keypad
+        applicationKeypad = set
+        break
+      case 9: // X10 mouse
+      case 1000: // Mouse tracking (basic)
+      case 1002: // Mouse tracking (button events)
+      case 1003: // Mouse tracking (all events)
+        mouseTracking = set
+        mouseTrackingMode = set ? code : 0
+        break
+      case 1015: // urxvt mouse encoding is independent of tracking
+        urxvtMouse = set
+        break
+      case 1016: // SGR pixel encoding is independent of tracking
+        pixelMouse = set
+        break
+      case 1004: // Focus tracking
+        focusTracking = set
+        break
+      case 1006: // SGR mouse mode
+        sgrMouse = set
+        break
+      case 1049: // Alternate screen buffer + save/restore cursor
+        if (set && !useAltScreen) {
+          savedCurX = curX
+          savedCurY = curY
+          useAltScreen = true
+          altGrid = makeGrid(cols, rows)
+          altSoftWrapped = new Array<boolean>(rows).fill(false)
+          altLineAttrs = new Array<number>(rows).fill(0)
+          grid = altGrid
+          softWrapped = altSoftWrapped
+          lineAttrs = altLineAttrs
+          curX = 0
+          curY = 0
+          markAllDirty() // whole visible buffer swapped
+        } else if (!set && useAltScreen) {
+          useAltScreen = false
+          grid = mainGrid
+          softWrapped = mainSoftWrapped
+          lineAttrs = mainLineAttrs
+          curX = savedCurX
+          curY = savedCurY
+          clampCursor()
+          markAllDirty()
+        }
+        break
+      case 69: // DECLRMM - Left/Right Margin Mode
+        leftRightMarginMode = set
+        if (!set) {
+          // Reset margins when mode is disabled
+          leftMargin = 0
+          rightMargin = cols - 1
+        }
+        break
+      case 2004: // Bracketed paste
+        bracketedPaste = set
+        break
+      case 2026: // Synchronized output
+        syncOutput = set
+        break
+      case 2031: // Color scheme reporting
+        colorSchemeReporting = set
+        break
+      case 3: // DECCOLM — 80/132 column. We track it & clear the screen (per DEC spec).
+        decColumnMode = set
+        for (let row = 0; row < rows; row++) {
+          eraseCells(row, 0, row, cols - 1)
+        }
+        curX = 0
+        curY = 0
+        break
+      case 1005: // UTF-8 extended mouse coordinates (legacy)
+        utf8MouseMode = set
+        break
+      case 1007: // Alternate scroll (xterm)
+        altScrollMode = set
+        break
+      case 1048: // Save/restore cursor position only
+        if (set) {
+          savedCurX = curX
+          savedCurY = curY
+        } else {
+          curX = savedCurX
+          curY = savedCurY
+          clampCursor()
+        }
+        break
+    }
+  }
+
   function handleCSIPrivate(params: string, intermediates: string, finalByte: string): void {
     const parts = params.split(";").map((s) => (s === "" ? 0 : parseInt(s, 10)))
 
     // CSI ? u — Query keyboard mode (Kitty keyboard protocol)
-    if (finalByte === "u") {
+    if (intermediates === "" && finalByte === "u") {
       if (onResponse) {
         onResponse(`\x1b[?${kittyKeyboardFlags}u`)
       }
@@ -2842,83 +3020,16 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     if (intermediates === "$" && finalByte === "p") {
       if (onResponse) {
         const mode = parts[0] ?? 0
-        let value = 0 // 0 = not recognized
-        switch (mode) {
-          case 1:
-            value = applicationCursor ? 1 : 2
-            break
-          case 6:
-            value = originMode ? 1 : 2
-            break
-          case 7:
-            value = autoWrap ? 1 : 2
-            break
-          case 25:
-            value = curVisible ? 1 : 2
-            break
-          case 47:
-          case 1047:
-          case 1049:
-            value = useAltScreen ? 1 : 2
-            break
-          case 66:
-            value = applicationKeypad ? 1 : 2
-            break
-          case 9:
-          case 1000:
-          case 1002:
-          case 1003:
-            value = mouseTrackingMode === mode ? 1 : 2
-            break
-          case 1015:
-            value = urxvtMouse ? 1 : 2
-            break
-          case 1016:
-            value = pixelMouse ? 1 : 2
-            break
-          case 1004:
-            value = focusTracking ? 1 : 2
-            break
-          case 1006:
-            value = sgrMouse ? 1 : 2
-            break
-          case 2004:
-            value = bracketedPaste ? 1 : 2
-            break
-          case 2026:
-            value = syncOutput ? 1 : 2
-            break
-          case 69:
-            value = leftRightMarginMode ? 1 : 2
-            break
-          case 2031:
-            value = colorSchemeReporting ? 1 : 2
-            break
-          case 5:
-            value = reverseVideo ? 1 : 2
-            break
-          case 20:
-            value = newLineMode ? 1 : 2
-            break
-          case 3:
-            value = decColumnMode ? 1 : 2
-            break
-          case 1005:
-            value = utf8MouseMode ? 1 : 2
-            break
-          case 1007:
-            value = altScrollMode ? 1 : 2
-            break
-          case 1048:
-            // ?1048 has no persistent "set" state — it's a save/restore toggle.
-            // Report as "reset" (2) per xterm convention.
-            value = 2
-            break
-        }
+        // ?1048 has no persistent "set" state — it's a save/restore toggle.
+        // Report as "reset" (2) per xterm convention.
+        const state = privateModeState(mode)
+        const value = mode === 1048 ? 2 : state === null ? 0 : state ? 1 : 2
         onResponse(`\x1b[?${mode};${value}$y`)
       }
       return
     }
+
+    if (intermediates !== "") return
 
     // Private DSR: CSI ? Ps n
     if (finalByte === "n") {
@@ -2946,130 +3057,30 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       return
     }
 
-    const set = finalByte === "h"
-
-    for (const code of parts) {
-      switch (code) {
-        case 1: // DECCKM - Application Cursor
-          applicationCursor = set
-          break
-        case 5: // DECSCNM - Reverse Video
-          reverseVideo = set
-          break
-        case 6: // DECOM - Origin Mode
-          originMode = set
-          break
-        case 7: // DECAWM - Autowrap Mode
-          autoWrap = set
-          break
-        case 25: // DECTCEM - Cursor Visible
-          curVisible = set
-          break
-        case 47: // Alternate screen buffer (old)
-        case 1047: // Alternate screen buffer
-          if (set && !useAltScreen) {
-            useAltScreen = true
-            grid = altGrid
-            softWrapped = altSoftWrapped
-            lineAttrs = altLineAttrs
-            markAllDirty() // whole visible buffer swapped
-          } else if (!set && useAltScreen) {
-            useAltScreen = false
-            grid = mainGrid
-            softWrapped = mainSoftWrapped
-            lineAttrs = mainLineAttrs
-            markAllDirty()
-          }
-          break
-        case 66: // DECNKM - Application Keypad
-          applicationKeypad = set
-          break
-        case 9: // X10 mouse
-        case 1000: // Mouse tracking (basic)
-        case 1002: // Mouse tracking (button events)
-        case 1003: // Mouse tracking (all events)
-          mouseTracking = set
-          mouseTrackingMode = set ? code : 0
-          break
-        case 1015: // urxvt mouse encoding is independent of tracking
-          urxvtMouse = set
-          break
-        case 1016: // SGR pixel encoding is independent of tracking
-          pixelMouse = set
-          break
-        case 1004: // Focus tracking
-          focusTracking = set
-          break
-        case 1006: // SGR mouse mode
-          sgrMouse = set
-          break
-        case 1049: // Alternate screen buffer + save/restore cursor
-          if (set && !useAltScreen) {
-            savedCurX = curX
-            savedCurY = curY
-            useAltScreen = true
-            altGrid = makeGrid(cols, rows)
-            altSoftWrapped = new Array<boolean>(rows).fill(false)
-            altLineAttrs = new Array<number>(rows).fill(0)
-            grid = altGrid
-            softWrapped = altSoftWrapped
-            lineAttrs = altLineAttrs
-            curX = 0
-            curY = 0
-            markAllDirty() // whole visible buffer swapped
-          } else if (!set && useAltScreen) {
-            useAltScreen = false
-            grid = mainGrid
-            softWrapped = mainSoftWrapped
-            lineAttrs = mainLineAttrs
-            curX = savedCurX
-            curY = savedCurY
-            clampCursor()
-            markAllDirty()
-          }
-          break
-        case 69: // DECLRMM - Left/Right Margin Mode
-          leftRightMarginMode = set
-          if (!set) {
-            // Reset margins when mode is disabled
-            leftMargin = 0
-            rightMargin = cols - 1
-          }
-          break
-        case 2004: // Bracketed paste
-          bracketedPaste = set
-          break
-        case 2026: // Synchronized output
-          syncOutput = set
-          break
-        case 2031: // Color scheme reporting
-          colorSchemeReporting = set
-          break
-        case 3: // DECCOLM — 80/132 column. We track it & clear the screen (per DEC spec).
-          decColumnMode = set
-          for (let row = 0; row < rows; row++) {
-            eraseCells(row, 0, row, cols - 1)
-          }
-          curX = 0
-          curY = 0
-          break
-        case 1005: // UTF-8 extended mouse coordinates (legacy)
-          utf8MouseMode = set
-          break
-        case 1007: // Alternate scroll (xterm)
-          altScrollMode = set
-          break
-        case 1048: // Save/restore cursor position only
-          if (set) {
-            savedCurX = curX
-            savedCurY = curY
-          } else {
-            curX = savedCurX
-            curY = savedCurY
-            clampCursor()
-          }
-          break
+    // XTSAVE — Save DEC Private Mode(s): CSI ? Pm s
+    if (finalByte === "s") {
+      for (const code of parts) {
+        const state = privateModeState(code)
+        if (state !== null) savedPrivateModes.set(code, state)
       }
+      return
+    }
+
+    // XTRESTORE — Restore DEC Private Mode(s): CSI ? Pm r
+    if (finalByte === "r") {
+      for (const code of parts) {
+        const saved = savedPrivateModes.get(code)
+        if (saved === undefined || saved === privateModeState(code)) continue
+        applyPrivateMode(code, saved)
+      }
+      return
+    }
+
+    if (finalByte !== "h" && finalByte !== "l") return
+
+    const set = finalByte === "h"
+    for (const code of parts) {
+      applyPrivateMode(code, set)
     }
   }
 
@@ -4249,6 +4260,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     decColumnMode = false
     altScrollMode = false
     utf8MouseMode = false
+    savedPrivateModes.clear()
     textScale = 1
     fontSize = 12
     fontWindowSize = 12
@@ -5319,6 +5331,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     iconLabel = Object.hasOwn(snapshotValue, "iconLabel") ? (snapshotValue.iconLabel as string) : snapshotValue.title
     titleStack.length = 0
     iconLabelStack.length = 0
+    savedPrivateModes.clear()
     clipboard = snapshotValue.clipboard
     cwd = snapshotValue.cwd
     notifications = [...snapshotValue.notifications]
