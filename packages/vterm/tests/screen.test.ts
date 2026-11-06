@@ -1195,6 +1195,32 @@ describe("editing operations", () => {
 // ═══════════════════════════════════════════════════════
 
 describe("mode management", () => {
+  test("reverse wrap backspace requires mode 45 and autowrap", () => {
+    const screen = screenWith("\x1b[2;1H\b", { cols: 10, rows: 3 })
+    expect(screen.getCursor()).toMatchObject({ row: 1, col: 0 })
+    screen.process(enc.encode("\x1b[?45h\b"))
+    expect(screen.getCursor()).toMatchObject({ row: 0, col: 9 })
+    screen.process(enc.encode("\x1b[?7l\x1b[2;1H\b"))
+    expect(screen.getCursor()).toMatchObject({ row: 1, col: 0 })
+  })
+
+  test("SGR stack restores nested and selected video attributes without restoring protection", () => {
+    const screen = screenWith("\x1b[1m\x1b[#{\x1b[22;3m\x1b[#{\x1b[23m\x1b[#}A\x1b[#}B")
+    expect(screen.getCell(0, 0)).toMatchObject({ bold: false, italic: true })
+    expect(screen.getCell(0, 1)).toMatchObject({ bold: true, italic: false })
+    screen.process(enc.encode('\x1b[1#p\x1b[22;3m\x1b[1"q\x1b[#}C'))
+    expect(screen.getCell(0, 2)).toMatchObject({ bold: true, italic: true, protected: true })
+    screen.process(enc.encode("\x1b[#}D"))
+    expect(screen.getCell(0, 3)).toMatchObject({ bold: true, italic: true })
+  })
+
+  test.each([47, 1047])("alternate mode %i preserves main, and only 1047 clears alt on exit", (mode) => {
+    const screen = screenWith(`MAIN\x1b[?${mode}h\x1b[HALT\x1b[?${mode}l`)
+    expect(screen.getCell(0, 0).char).toBe("M")
+    screen.process(enc.encode(`\x1b[?${mode}h`))
+    expect(screen.getCell(0, 0).char).toBe(mode === 1047 ? "" : "A")
+  })
+
   test("alternate screen", () => {
     const screen = screenWith("hello\x1b[?1049h")
     expect(screen.getMode("altScreen")).toBe(true)
@@ -1443,12 +1469,17 @@ describe("insert mode", () => {
   // @failure DECRQM ?4 reports ANSI IRM instead of the unsupported DECSCLM mode.
   // @level l0
   // @consumer Terminal applications querying DEC private mode support.
-  test.each([false, true])("DEC private 4 query is unrecognized with ANSI insert mode %s", (insert) => {
+  test.each([false, true])("smooth-scroll mode set/query/reset is independent of ANSI insert mode %s", (insert) => {
     const replies: string[] = []
     const screen = createVtermScreen({ onResponse: (reply) => replies.push(reply) })
     if (insert) screen.process(enc.encode("\x1b[4h"))
-    screen.process(enc.encode("\x1b[?4$p"))
-    expect(replies).toEqual(["\x1b[?4;0$y"])
+    screen.process(enc.encode("\x1b[?4h\x1b[?4$p"))
+    expect(screen.getMode("smoothScroll")).toBe(true)
+    expect(screen.getMode("insertMode")).toBe(insert)
+    screen.process(enc.encode("\x1b[?4l\x1b[?4$p"))
+    expect(screen.getMode("smoothScroll")).toBe(false)
+    expect(screen.getMode("insertMode")).toBe(insert)
+    expect(replies).toEqual(["\x1b[?4;1$y", "\x1b[?4;2$y"])
   })
 
   test("insert mode shifts characters right", () => {
@@ -1534,6 +1565,28 @@ describe("resize", () => {
 // ═══════════════════════════════════════════════════════
 
 describe("semantic prompts (OSC 133)", () => {
+  test("XTGETXRES reports the existing terminal identity and refuses unknown resources", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    screen.process(enc.encode("\x1bP+Q7465726d4e616d65\x1b\\\x1bP+Q6e6f73756368\x1b\\"))
+    expect(responses).toEqual(["\x1bP1+R7465726d4e616d65=767465726d\x1b\\", "\x1bP0+R6e6f73756368\x1b\\"])
+  })
+
+  test("OSC 133 P marks a prompt at the current cursor without moving it", () => {
+    const screen = screenWith("prefix\x1b]133;P\x07")
+    expect(screen.getSemanticZones()).toEqual([{ type: "prompt", startRow: 0, startCol: 6 }])
+    expect(screen.getCursor()).toMatchObject({ row: 0, col: 6 })
+  })
+
+  test("OSC 633 P updates the existing working directory", () => {
+    const screen = screenWith("\x1b]7;file://host/before\x07\x1b]633;P;Cwd=/tmp/one\x07")
+    expect(screen.getCwd()).toBe("/tmp/one")
+    screen.process(enc.encode("\x1b]633;P;Cwd=/tmp/two=three\x1b\\"))
+    expect(screen.getCwd()).toBe("/tmp/two=three")
+    screen.process(enc.encode("\x1b]633;P;Unknown=ignored\x07"))
+    expect(screen.getCwd()).toBe("/tmp/two=three")
+  })
+
   test("OSC 133 semantic prompt markers", () => {
     const screen = createVtermScreen({ cols: 80, rows: 24 })
     screen.process(enc.encode("\x1b]133;A\x07$ \x1b]133;B\x07ls\n\x1b]133;C\x07file1 file2\n\x1b]133;D;0\x07"))
@@ -2272,12 +2325,12 @@ describe("color scheme reporting (mode 2031)", () => {
     expect(responses[1]).toBe("\x1b[?2031;1$y")
   })
 
-  test("DSR 997 responds with dark color scheme", () => {
+  test("DSR 996 reports the OSC 11 background scheme, including reset", () => {
     const responses: string[] = []
     const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
-    // CSI ? 997 n — query color scheme
-    screen.process(enc.encode("\x1b[?997n"))
-    expect(responses[0]).toBe("\x1b[?997;1n") // 1 = dark
+    screen.process(enc.encode("\x1b[?996n\x1b]11;rgb:ff/ff/ff\x07\x1b[?996n"))
+    screen.process(enc.encode("\x1b]111\x07\x1b[?996n\x1b[?997n"))
+    expect(responses).toEqual(["\x1b[?997;1n", "\x1b[?997;2n", "\x1b[?997;1n"])
   })
 
   test("reset clears color scheme reporting", () => {
@@ -2458,42 +2511,149 @@ test("OSC 1337 Capabilities answers the official feature-reporting request", () 
 // OSC 5522 — Advanced Clipboard (Kitty protocol)
 // ═══════════════════════════════════════════════════════
 
+// @failure Real typed OSC 5522 transfers must share OSC 52 state and preserve it on invalid writes.
+// @level l0
+// @consumer Terminal applications reading/writing the emulator clipboard.
 describe("OSC 5522 — advanced clipboard", () => {
-  test("store and query clipboard data", () => {
+  test.each(["\x07", "\x1b\\"])("accepts a legal 4096-byte chunk and consumes rejected overflow through %j", (end) => {
     const responses: string[] = []
     const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
-    // Store "hello" (base64: aGVsbG8=)
-    screen.process(enc.encode("\x1b]5522;aGVsbG8=\x1b\\"))
-    // Query
-    screen.process(enc.encode("\x1b]5522;?\x1b\\"))
-    expect(responses[0]).toBe("\x1b]5522;aGVsbG8=\x1b\\")
+    const data = "x".repeat(4096)
+    const write = (value: string) => {
+      screen.process(enc.encode(`\x1b]5522;type=write:id=chunk${end}`))
+      screen.process(enc.encode(`\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;${value}`))
+      screen.process(enc.encode(end))
+      screen.process(enc.encode(`\x1b]5522;type=wdata${end}`))
+    }
+    write(btoa(data))
+    expect(screen.getClipboard()).toBe(data)
+    screen.process(enc.encode(`\x1b]52;c;?${end}`))
+    expect(responses.at(-1)).toBe(`\x1b]52;c;${btoa(data)}\x1b\\`)
+    responses.length = 0
+    write("A".repeat(13000))
+    expect(screen.getClipboard()).toBe(data)
+    expect(responses).toEqual(["\x1b]5522;type=write:status=EINVAL:id=chunk\x1b\\"])
+    expect(screen.getText().trim()).toBe("")
+    write(btoa("recovered"))
+    expect(screen.getClipboard()).toBe("recovered")
   })
 
-  test("query empty clipboard", () => {
+  test.each([
+    ["ASCII", "hello", "aGVsbG8="],
+    ["non-ASCII", "☃", "4piD"],
+    ["empty", "", ""],
+  ])(
+    "extensions.osc5522-clipboard: %s paste emits exact Kitty frames, overrides 2004 and reads back",
+    (_label, text, encoded) => {
+      const responses: string[] = []
+      const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+      screen.process(enc.encode("\x1b[?2004h\x1b[?5522h"))
+      const saved = screen.snapshot()
+      const expected =
+        "\x1b]5522;type=read:status=OK\x1b\\" +
+        "\x1b]5522;type=read:status=DATA:mime=Lg==" +
+        (text ? ";dGV4dC9wbGFpbgo=" : "") +
+        "\x1b\\\x1b]5522;type=read:status=DONE\x1b\\"
+      expect(new TextDecoder().decode(screen.encodePaste(text))).toBe(expected)
+      screen.process(enc.encode("\x1b]52;c;?\x07\x1b]5522;type=read;dGV4dC9wbGFpbg==\x07"))
+      expect(responses[0]).toBe(`\x1b]52;c;${encoded}\x1b\\`)
+      expect(responses.filter((frame) => frame.includes("type=read:status=DATA"))).toEqual(
+        text ? [`\x1b]5522;type=read:status=DATA:mime=dGV4dC9wbGFpbg==;${encoded}\x1b\\`] : [],
+      )
+      screen.process(enc.encode("\x1b[?5522l"))
+      screen.restore(saved)
+      expect(new TextDecoder().decode(screen.encodePaste(text))).toBe(expected)
+      screen.reset()
+      expect(new TextDecoder().decode(screen.encodePaste(text))).toBe(text)
+    },
+  )
+
+  test.each([false, true])(
+    "extensions.osc5522-clipboard: mode off preserves bytes with bracketed paste %s",
+    (bracketed) => {
+      const screen = createVtermScreen()
+      if (bracketed) screen.process(enc.encode("\x1b[?2004h"))
+      const text = "paste\n☃"
+      expect(new TextDecoder().decode(screen.encodePaste(text))).toBe(bracketed ? `\x1b[200~${text}\x1b[201~` : text)
+    },
+  )
+
+  test("chunked write and typed read share OSC 52 clipboard, preserve ids and advertise real mode", () => {
     const responses: string[] = []
     const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
-    screen.process(enc.encode("\x1b]5522;?\x1b\\"))
-    // btoa("") === ""
-    expect(responses[0]).toBe("\x1b]5522;\x1b\\")
+    screen.process(enc.encode("\x1b]5522;type=write:id=w\x1b\\"))
+    screen.process(enc.encode("\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aG\x1b\\"))
+    screen.process(enc.encode("\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;VsbG8=\x1b\\"))
+    expect(screen.getClipboard()).toBe("")
+    screen.process(enc.encode("\x1b]5522;type=wdata\x1b\\"))
+    expect(screen.getClipboard()).toBe("hello")
+    screen.process(enc.encode("\x1b]52;c;?\x07\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\"))
+    screen.process(enc.encode("\x1b[?5522$p\x1b[?5522h\x1b[?5522$p"))
+    expect(responses).toEqual([
+      "\x1b]5522;type=write:status=DONE:id=w\x1b\\",
+      "\x1b]52;c;aGVsbG8=\x1b\\",
+      "\x1b]5522;type=read:status=OK:id=r\x1b\\",
+      "\x1b]5522;type=read:status=DATA:id=r:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\",
+      "\x1b]5522;type=read:status=DONE:id=r\x1b\\",
+      "\x1b[?5522;2$y",
+      "\x1b[?5522;1$y",
+    ])
   })
 
-  test("store with BEL terminator", () => {
+  test.each([
+    ["text/plain", "%%%="],
+    ["text/plain", "aGVsbG8"],
+    ["image/png", "AA=="],
+  ])("refuses invalid or unsupported write %s/%s without replacing clipboard", (mime, data) => {
     const responses: string[] = []
     const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
-    // Store "test" (base64: dGVzdA==)
-    screen.process(enc.encode("\x1b]5522;dGVzdA==\x07"))
-    // Query
-    screen.process(enc.encode("\x1b]5522;?\x07"))
-    expect(responses[0]).toBe("\x1b]5522;dGVzdA==\x1b\\")
+    screen.process(enc.encode("\x1b]52;c;a2VlcA==\x07"))
+    responses.length = 0
+    screen.process(enc.encode("\x1b]5522;type=write:id=bad\x07"))
+    screen.process(enc.encode(`\x1b]5522;type=wdata:mime=${btoa(mime)};${data}\x07`))
+    screen.process(enc.encode("\x1b]5522;type=wdata\x07"))
+    expect(screen.getClipboard()).toBe("keep")
+    expect(responses).toEqual(["\x1b]5522;type=write:status=EINVAL:id=bad\x1b\\"])
   })
 
-  test("reset clears advanced clipboard", () => {
-    const responses: string[] = []
-    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
-    screen.process(enc.encode("\x1b]5522;aGVsbG8=\x1b\\"))
+  test("restore discards unfinished transfer while retaining completed clipboard and mode", () => {
+    const screen = screenWith("\x1b]52;c;a2VlcA==\x07\x1b[?5522h")
+    const saved = screen.snapshot()
+    screen.process(enc.encode("\x1b]5522;type=write\x07\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;bmV3\x07"))
+    screen.restore(saved)
+    screen.process(enc.encode("\x1b]5522;type=wdata\x07"))
+    expect(screen.getClipboard()).toBe("keep")
+    expect(Reflect.get(screen.snapshot().modes, "clipboardPasteEvents")).toBe(true)
     screen.reset()
-    screen.process(enc.encode("\x1b]5522;?\x1b\\"))
-    expect(responses[0]).toBe("\x1b]5522;\x1b\\")
+    expect(screen.getClipboard()).toBe("")
+    expect(Reflect.get(screen.snapshot().modes, "clipboardPasteEvents")).toBe(false)
+  })
+})
+
+// @failure Query-only OSC 99 support must not stand in for completed notification delivery.
+// @level l0
+// @consumer Applications using Kitty notifications via the existing notification reader.
+describe("OSC 99 — notifications", () => {
+  test("query echoes id and multipart notifications deliver through the existing store", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    screen.process(enc.encode("\x1b]9;legacy\x07\x1b]99;i=query:p=?;\x1b\\"))
+    screen.process(enc.encode("\x1b]99;i=a:d=0;Title\x1b\\"))
+    expect(screen.getNotifications()).toEqual(["legacy"])
+    screen.process(enc.encode("\x1b]99;i=b:p=body;Other\x1b\\"))
+    screen.process(enc.encode("\x1b]99;i=a:p=body:e=1;4piD\x1b\\"))
+    expect(screen.getNotifications()).toEqual(["legacy", "Other", "Title\n☃"])
+    expect(responses).toEqual(["\x1b]99;i=query:p=?;o=always:p=title,body\x1b\\"])
+  })
+
+  test.each(["restore", "reset"])("%s discards unfinished notification assembly", (action) => {
+    const screen = createVtermScreen()
+    const saved = screen.snapshot()
+    screen.process(enc.encode("\x1b]99;i=a:d=0;Stale title\x07"))
+    if (action === "restore") screen.restore(saved)
+    else screen.reset()
+    screen.process(enc.encode("\x1b]99;i=a:p=body;Body\x07"))
+    expect(screen.getNotifications()).toEqual(["Body"])
   })
 })
 

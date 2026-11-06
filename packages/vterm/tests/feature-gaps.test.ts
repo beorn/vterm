@@ -141,6 +141,23 @@ describe("OSC 30001/30101 — Kitty color stack", () => {
   })
 })
 
+describe("CSI color stack", () => {
+  test("push/pop restores a nondefault palette and reports actual stack depth", () => {
+    const { responses, feed } = makeScreen()
+    feed("\x1b]4;1;rgb:12/34/56\x07\x1b[#P\x1b[#R")
+    feed("\x1b]4;1;rgb:ab/cd/ef\x07\x1b[#P\x1b[#R")
+    feed("\x1b]4;1;rgb:ff/ff/ff\x07\x1b[#Q\x1b]4;1;?\x07")
+    feed("\x1b[#Q\x1b]4;1;?\x07\x1b[#R")
+    expect(responses).toEqual([
+      "\x1b[?1;1#Q",
+      "\x1b[?2;2#Q",
+      "\x1b]4;1;rgb:abab/cdcd/efef\x1b\\",
+      "\x1b]4;1;rgb:1212/3434/5656\x1b\\",
+      "\x1b[?0;0#Q",
+    ])
+  })
+})
+
 describe("OSC 21 — Kitty key=value colors", () => {
   test("multiple queries yield joined response", () => {
     const { responses, feed } = makeScreen()
@@ -225,6 +242,18 @@ describe("DECALN (ESC # 8)", () => {
 // ── Rectangular area ops ──
 
 describe("rectangular area operations", () => {
+  test("DECSACE selects stream versus rectangle attribute extent", () => {
+    const { screen, feed } = makeScreen({ cols: 6, rows: 3 })
+    feed("ABCDEF\r\nGHIJKL\r\nMNOPQR")
+    feed("\x1b[2*x\x1b[1;3;3;4;7$r")
+    expect(screen.getCell(0, 4).inverse).toBe(false)
+    expect(screen.getCell(1, 0).inverse).toBe(false)
+    feed("\x1b[0*x\x1b[1;3;3;4;7$r")
+    expect(screen.getCell(0, 4).inverse).toBe(true)
+    expect(screen.getCell(1, 0).inverse).toBe(true)
+    expect(screen.getCell(2, 4).inverse).toBe(false)
+  })
+
   test("DECFRA fills rectangle with specified character", () => {
     const { screen, feed } = makeScreen({ cols: 20, rows: 5 })
     feed("\x1b[88;1;1;3;5$x") // fill rows 1-3, cols 1-5 with 'X' (88)
@@ -248,6 +277,14 @@ describe("rectangular area operations", () => {
     for (let c = 0; c < 5; c++) {
       expect(screen.getCell(0, c).char).not.toBe("HELLO"[c])
     }
+  })
+
+  test("DECSERA preserves protected cells while DECERA erases them", () => {
+    const { screen, feed } = makeScreen({ cols: 20, rows: 5 })
+    feed('\x1b[1"qP\x1b[0"qABCDZ\x1b[1;1;1;5${')
+    expect(Array.from({ length: 6 }, (_, col) => screen.getCell(0, col).char)).toEqual(["P", "", "", "", "", "Z"])
+    feed("\x1b[1;1;1;1$z")
+    expect(screen.getCell(0, 0).char).toBe("")
   })
 
   test("DECCRA copies rectangle preserving source", () => {
@@ -337,10 +374,33 @@ describe("new mode tracking", () => {
     expect(responses[0]).toMatch(/\x1b\[\?3;2\$y/)
   })
 
-  test("?3 DECCOLM clears screen when toggled", () => {
-    const { screen, feed } = makeScreen({ cols: 80, rows: 5 })
+  test("?3 DECCOLM resizes and clears screen when toggled", () => {
+    const { screen, feed, responses } = makeScreen({ cols: 80, rows: 5 })
     feed("HELLO\x1b[?3h")
     expect(screen.getCell(0, 0).char).not.toBe("H")
+    expect(screen.cols).toBe(132)
+    feed("\x1b[1;132HX\x1b[?3l")
+    expect(screen.cols).toBe(80)
+    expect(screen.getCursor()).toMatchObject({ row: 0, col: 0 })
+    expect(screen.getCell(0, 0).char).toBe("")
+    feed("KEEP\x1b[2;4r\x1b[3;5H\x1b[?40l")
+    const held = screen.snapshot()
+    feed("\x1b[?3h\x1b[?40$p")
+    expect(screen.cols).toBe(80)
+    expect(screen.getCell(0, 0).char).toBe("K")
+    expect(screen.getCursor()).toEqual({ row: 2, col: 4 })
+    expect(screen.snapshot().margins).toEqual(held.margins)
+    expect(screen.snapshot().modes.decColumn).toBe(false)
+    expect(responses.at(-1)).toBe("\x1b[?40;2$y")
+    feed("\x1b[?40s\x1b[?40h\x1b[?3h\x1b[?40r\x1b[?3l")
+    expect(screen.cols).toBe(132)
+    expect(screen.snapshot().modes.decColumn).toBe(true)
+    feed("\x1b[?40h\x1b[?3l\x1b[?40l\x1b[!p\x1b[?3h")
+    expect(screen.cols).toBe(132)
+    feed("\x1b[?40l")
+    screen.reset()
+    feed("\x1b[?3l")
+    expect(screen.cols).toBe(80)
   })
 
   test("?1005 utf8 mouse — trackable via DECRPM", () => {

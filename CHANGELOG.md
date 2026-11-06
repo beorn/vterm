@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- DECCOLM honours the ?40 column-switching gate. The gate starts open for
+  compatibility with existing callers; a real terminal may start it closed.
+  A closed gate leaves the screen untouched. Snapshots preserve the gate.
+- OSC 99 delivers completed title/body notifications through getNotifications.
+  OSC 5522 implements text/plain transfers using the same clipboard as OSC 52.
+  With mode 5522 set, encodePaste(text) updates that clipboard and returns a
+  MIME-list paste event; it takes priority over bracketed-paste mode 2004.
+  Mode-off paste bytes retain their existing encoding.
+- vterm.js implements reverse wraparound, smooth-scroll mode readback, SGR
+  push/pop and the non-indexed CSI color stack using its existing palette store.
+  New mode and SGR stack snapshot fields are optional version-1 header members;
+  older snapshots restore their reset defaults.
+- DECSACE now defaults to stream extent (0), so multi-row DECCARA/DECRARA
+  affect the cells from start to end. Send CSI 2 * x for rectangular extent.
+  Indexed palette slots remain unimplemented; color stack reports active depth.
+
 ## 0.13.2
 
 - vterm.js now implements `XTSAVE` (`CSI ? Pm s`) and `XTRESTORE` (`CSI ? Pm r`)

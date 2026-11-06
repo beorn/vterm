@@ -257,6 +257,14 @@ export interface Snapshot {
     /** Independent encoding flags; absent in older version-1 snapshots means reset. */
     urxvtMouse?: boolean
     pixelMouse?: boolean
+    clipboardPasteEvents?: boolean
+    /** Absent in older version-1 snapshots: reset. */
+    reverseWrap?: boolean
+    /** ?40 column switching gate; absent in older snapshots means open. */
+    allowColumnSwitch?: boolean
+    smoothScroll?: boolean
+    /** DECSACE: 0/1 stream, 2 rectangle; legacy absence means 0. */
+    attributeChangeExtent?: 0 | 1 | 2
     focusTracking: boolean
     origin: boolean
     insert: boolean
@@ -283,6 +291,8 @@ export interface Snapshot {
     current: ScreenColorStateSnapshot
     stack: ScreenColorStateSnapshot[]
   }
+  /** Additive v1 header state. Absent means no saved SGR attributes; depth at most 10. */
+  sgrStack?: { attrs: Omit<ScreenAttrsSnapshot, "protected" | "url">; parameters: number[] }[]
   tabStops: number[]
   title: string
   /** Independent icon label. Legacy absence restores from title; a supplied value must be a string. XTWINOPS 22/23 title/icon stacks are deliberately not snapshotted (`restore()` clears them). */
@@ -507,7 +517,11 @@ export interface Screen {
   readonly signals: ScreenSignals
 
   process(data: Uint8Array): void
-  /** Encode UTF-8 paste using this screen's mode 2004; preserve newline bytes. */
+  /**
+   * Encode paste preserving UTF-8/newlines. Mode 5522 takes priority over 2004:
+   * it updates the shared clipboard and emits a MIME-list paste event.
+   * With mode 5522 off, encode ordinary or bracketed paste without that side effect.
+   */
   encodePaste(text: string): Uint8Array
   resize(cols: number, rows: number): void
   /**
@@ -1277,11 +1291,16 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let applicationCursor = false
   let applicationKeypad = false
   let autoWrap = true
+  let reverseWrap = false
+  let smoothScroll = false
+  let attributeChangeExtent: 0 | 1 | 2 = 0
+  const sgrStack: NonNullable<Snapshot["sgrStack"]> = []
   let mouseTracking = false
   let mouseTrackingMode = 0 // 9, 1000, 1002, 1003
   let sgrMouse = false
   let urxvtMouse = false
   let pixelMouse = false
+  let clipboardPasteEvents = false
   let focusTracking = false
   let originMode = false
   let insertMode = false
@@ -1319,7 +1338,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let colorSchemeReporting = false
 
   // Additional DEC/xterm private modes we track (and report via DECRPM)
-  let decColumnMode = false // ?3 — DECCOLM (80/132 columns). We don't switch width, just track.
+  let decColumnMode = false // ?3 — DECCOLM (80/132 columns).
+  let allowColumnSwitch = true // ?40 — preserve legacy ?3 behaviour unless explicitly closed.
   let altScrollMode = false // ?1007
   let utf8MouseMode = false // ?1005
   // Kept outside Snapshot: a restored snapshot starts with nothing saved.
@@ -1337,6 +1357,15 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let highlightFgColor: Color | null = null // OSC 19 / 119
   type ColorStateSnapshot = ScreenColorStateSnapshot
   const colorStack: ColorStateSnapshot[] = []
+
+  function pushColors(maxDepth = Infinity): void {
+    if (colorStack.length < maxDepth) colorStack.push(snapshotColorState())
+  }
+
+  function popColors(): void {
+    const snapshot = colorStack.pop()
+    if (snapshot) restoreColorState(snapshot)
+  }
 
   function cloneColor(c: Color | null): Color | null {
     return c ? { ...c } : null
@@ -1389,6 +1418,20 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       fg: cloneColor(source.fg),
       bg: cloneColor(source.bg),
       underlineColor: cloneColor(source.underlineColor),
+    }
+  }
+
+  function cloneSgrStackEntry(
+    entry: NonNullable<Snapshot["sgrStack"]>[number],
+  ): NonNullable<Snapshot["sgrStack"]>[number] {
+    return {
+      attrs: {
+        ...entry.attrs,
+        fg: cloneColor(entry.attrs.fg),
+        bg: cloneColor(entry.attrs.bg),
+        underlineColor: cloneColor(entry.attrs.underlineColor),
+      },
+      parameters: [...entry.parameters],
     }
   }
 
@@ -1559,8 +1602,48 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       assertBoolean(`modes.${name}`, modes[name])
     }
     assertInteger("modes.mouseTrackingMode", modes.mouseTrackingMode)
-    for (const name of ["urxvtMouse", "pixelMouse"]) {
+    for (const name of [
+      "urxvtMouse",
+      "pixelMouse",
+      "reverseWrap",
+      "smoothScroll",
+      "clipboardPasteEvents",
+      "allowColumnSwitch",
+    ]) {
       if (Object.hasOwn(modes, name)) assertBoolean(`modes.${name}`, modes[name])
+    }
+    if (Object.hasOwn(modes, "attributeChangeExtent") && ![0, 1, 2].includes(modes.attributeChangeExtent as number)) {
+      throw new TypeError("Invalid vterm snapshot modes.attributeChangeExtent")
+    }
+    if (Object.hasOwn(value, "sgrStack")) {
+      if (!Array.isArray(value.sgrStack) || value.sgrStack.length > 10) {
+        throw new TypeError("Invalid vterm snapshot sgrStack")
+      }
+      for (const entry of value.sgrStack) {
+        assertRecord("sgrStack entry", entry)
+        assertRecord("sgrStack attrs", entry.attrs)
+        if (Object.hasOwn(entry.attrs, "protected") || Object.hasOwn(entry.attrs, "url")) {
+          throw new TypeError("Invalid vterm snapshot sgrStack non-SGR attributes")
+        }
+        for (const key of ["bold", "faint", "italic", "blink", "inverse", "hidden", "overline", "strikethrough"]) {
+          assertBoolean(`sgrStack attrs.${key}`, entry.attrs[key])
+        }
+        if (!["none", "single", "double", "curly", "dotted", "dashed"].includes(entry.attrs.underline as string)) {
+          throw new TypeError("Invalid vterm snapshot sgrStack underline")
+        }
+        for (const key of ["fg", "bg", "underlineColor"]) {
+          const color = entry.attrs[key]
+          if (color !== null) {
+            assertRecord(`sgrStack ${key}`, color)
+            for (const channel of ["r", "g", "b"]) {
+              assertInteger("sgrStack color channel", color[channel])
+              if ((color[channel] as number) > 255) throw new TypeError("Invalid vterm snapshot sgrStack color")
+            }
+          }
+        }
+        if (!Array.isArray(entry.parameters)) throw new TypeError("Invalid vterm snapshot sgrStack parameters")
+        for (const parameter of entry.parameters) assertInteger("sgrStack parameter", parameter)
+      }
     }
     assertInteger("modes.kittyKeyboardFlags", modes.kittyKeyboardFlags)
     if (!Array.isArray(modes.kittyKeyboardStack)) {
@@ -1684,8 +1767,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // Locale query state (OSC 701)
   let locale = "en_US.UTF-8"
 
-  // Advanced clipboard (OSC 5522 — Kitty clipboard protocol)
-  let advancedClipboard = ""
+  // OSC 5522 transfer assembly is transient; completed text shares OSC 52's clipboard.
+  let clipboardWrite: { id: string; data: string; hasText: boolean } | null = null
 
   // Viewport scroll offset
   let viewportOffset = 0
@@ -1703,6 +1786,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   // Notifications (OSC 9)
   let notifications: string[] = []
+  const notificationAssembly = new Map<string, { title: string; body: string }>()
 
   // Semantic prompt zones (OSC 133 / OSC 633)
   let semanticZones: SemanticZone[] = []
@@ -2343,6 +2427,74 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   function handleCSI(params: string, intermediates: string, finalByte: string): void {
     const parts = params.split(";").map((s) => (s === "" ? 0 : parseInt(s, 10)))
 
+    if (intermediates === "#") {
+      if (finalByte === "P" || finalByte === "Q") {
+        // Indexed palette slots are not implemented; CSI and OSC share the dense stack.
+        for (const parameter of parts) {
+          if (parameter !== 0) continue
+          if (finalByte === "P") pushColors(10)
+          else popColors()
+        }
+      } else if (finalByte === "R") {
+        // Report active depth. Unlike xterm's retained slots, this stack has no high-water mark.
+        if (onResponse) onResponse(`\x1b[?${colorStack.length};${colorStack.length}#Q`)
+      } else if ((finalByte === "{" || finalByte === "p") && sgrStack.length < 10) {
+        const { protected: _protection, url: _url, ...savedAttrs } = cloneAttrsSnapshot(attrs)
+        sgrStack.push({ attrs: savedAttrs, parameters: params === "" ? [] : parts })
+      } else if (finalByte === "}") {
+        const entry = sgrStack.pop()
+        if (entry) {
+          const saved = entry.attrs
+          if (entry.parameters.length === 0 || entry.parameters.includes(0)) {
+            attrs = {
+              ...attrs,
+              ...saved,
+              fg: cloneColor(saved.fg),
+              bg: cloneColor(saved.bg),
+              underlineColor: cloneColor(saved.underlineColor),
+            }
+          } else {
+            for (const parameter of entry.parameters) {
+              switch (parameter) {
+                case 1:
+                  attrs.bold = saved.bold
+                  break
+                case 2:
+                  attrs.faint = saved.faint
+                  break
+                case 3:
+                  attrs.italic = saved.italic
+                  break
+                case 4:
+                case 21:
+                  attrs.underline = saved.underline
+                  break
+                case 5:
+                  attrs.blink = saved.blink
+                  break
+                case 7:
+                  attrs.inverse = saved.inverse
+                  break
+                case 8:
+                  attrs.hidden = saved.hidden
+                  break
+                case 9:
+                  attrs.strikethrough = saved.strikethrough
+                  break
+                case 30:
+                  attrs.fg = cloneColor(saved.fg)
+                  break
+                case 31:
+                  attrs.bg = cloneColor(saved.bg)
+                  break
+              }
+            }
+          }
+        }
+      }
+      return
+    }
+
     // CSI with intermediates
     if (intermediates === " ") {
       if (finalByte === "q") {
@@ -2429,11 +2581,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         markScreenRowsDirty(t, Math.min(b, rows - 1))
       } else if (finalByte === "z" || finalByte === "{") {
         // DECERA — Erase Rectangular Area (finalByte 'z')
-        // DECSERA — Selective Erase Rectangular Area (finalByte '{', treated identically in headless mode)
+        // DECSERA — Selective Erase Rectangular Area (finalByte '{').
         const { t, l, b, r } = normalizeRect(parts[0] ?? 1, parts[1] ?? 1, parts[2] ?? rows, parts[3] ?? cols)
         for (let row = t; row <= b && row < rows; row++) {
           const gr = itemAt(grid, row, "rectangular fill rows")
           for (let col = l; col <= r && col < cols; col++) {
+            if (finalByte === "{" && gr.getCellRaw(col).protected) continue
             gr.setEmpty(col)
           }
         }
@@ -2476,8 +2629,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         const reverse = finalByte === "t"
         for (let row = t; row <= b && row < rows; row++) {
           const gr = itemAt(grid, row, "rectangular attribute rows")
-          for (let col = l; col <= r && col < cols; col++) {
+          const start = attributeChangeExtent === 2 || row === t ? l : 0
+          const end = attributeChangeExtent === 2 || row === b ? r : cols - 1
+          for (let col = start; col <= end && col < cols; col++) {
             const cell = gr.getCellRaw(col)
+            if (cell.char === "") {
+              if (attributeChangeExtent !== 2) continue
+              cell.char = " "
+            }
             applyRectAttrs(cell, sgrParts, reverse)
             gr.setCellRaw(col, cell)
           }
@@ -2518,7 +2677,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         const hex = sum.toString(16).toUpperCase().padStart(4, "0")
         if (onResponse) onResponse(`\x1bP${pid}!~${hex}\x1b\\`)
       } else if (finalByte === "x") {
-        // DECSACE — Select Attribute Change Extent (stream vs rectangle). Consumed only.
+        const extent = parts[0] ?? 0
+        if (extent === 0 || extent === 1 || extent === 2) attributeChangeExtent = extent
       }
       return
     }
@@ -2846,6 +3006,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   function privateModeState(mode: number): boolean | null {
     switch (mode) {
+      case 5522:
+        return clipboardPasteEvents
+      case 4:
+        return smoothScroll
+      case 45:
+        return reverseWrap
       case 1:
         return applicationCursor
       case 6:
@@ -2887,6 +3053,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         return newLineMode
       case 3:
         return decColumnMode
+      case 40:
+        return allowColumnSwitch
       case 1005:
         return utf8MouseMode
       case 1007:
@@ -2898,6 +3066,18 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   function applyPrivateMode(code: number, set: boolean): void {
     switch (code) {
+      case 5522:
+        clipboardPasteEvents = set
+        break
+      case 4:
+        smoothScroll = set
+        break
+      case 45:
+        reverseWrap = set
+        break
+      case 40:
+        allowColumnSwitch = set
+        break
       case 1: // DECCKM - Application Cursor
         applicationCursor = set
         break
@@ -2922,6 +3102,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           lineAttrs = altLineAttrs
           markAllDirty() // whole visible buffer swapped
         } else if (!set && useAltScreen) {
+          if (code === 1047) {
+            altGrid = makeGrid(cols, rows)
+            altSoftWrapped = new Array<boolean>(rows).fill(false)
+            altLineAttrs = new Array<number>(rows).fill(0)
+          }
           useAltScreen = false
           grid = mainGrid
           softWrapped = mainSoftWrapped
@@ -2993,11 +3178,19 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       case 2031: // Color scheme reporting
         colorSchemeReporting = set
         break
-      case 3: // DECCOLM — 80/132 column. We track it & clear the screen (per DEC spec).
+      case 3: // DECCOLM — clear the page, select 80/132 columns and home.
+        if (!allowColumnSwitch) break
         decColumnMode = set
         for (let row = 0; row < rows; row++) {
           eraseCells(row, 0, row, cols - 1)
         }
+        softWrapped.fill(false)
+        lineAttrs.fill(0)
+        resizeGrid(set ? 132 : 80, rows)
+        scrollTop = 0
+        scrollBottom = rows - 1
+        leftMargin = 0
+        rightMargin = cols - 1
         curX = 0
         curY = 0
         break
@@ -3053,9 +3246,15 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         if (ps === 6) {
           // DECXCPR — Extended Cursor Position Report
           onResponse(`\x1b[?${curY + 1};${curX + 1}n`)
-        } else if (ps === 997) {
-          // Color scheme report: 1 = dark, 2 = light
-          onResponse("\x1b[?997;1n")
+        } else if (ps === 996) {
+          // Query 996, reply 997. Use the same default background as OSC 11.
+          const bg = defaultBgColor ?? { r: 0, g: 0, b: 0 }
+          const linear = (channel: number) => {
+            const value = channel / 255
+            return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
+          }
+          const luminance = 0.2126 * linear(bg.r) + 0.7152 * linear(bg.g) + 0.0722 * linear(bg.b)
+          onResponse(`\x1b[?997;${luminance < 0.5 ? 1 : 2}n`)
         }
       }
       return
@@ -3643,6 +3842,129 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   // ── OSC handler ──
 
+  function oscFields(value: string): { metadata: Record<string, string>; payload: string } {
+    const separator = value.indexOf(";")
+    const header = separator < 0 ? value : value.slice(0, separator)
+    const metadata = Object.fromEntries(
+      header.split(":").flatMap((field) => {
+        const equals = field.indexOf("=")
+        return equals < 0 ? [] : [[field.slice(0, equals), field.slice(equals + 1)]]
+      }),
+    )
+    return { metadata, payload: separator < 0 ? "" : value.slice(separator + 1) }
+  }
+
+  function decodeBase64(value: string): string | null {
+    // OSC 5522 requires padded RFC 4648 input; atob alone tolerates malformed data.
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) return null
+    const decoded = atob(value)
+    return btoa(decoded) === value ? decoded : null
+  }
+
+  function handleNotification(value: string): void {
+    const { metadata, payload } = oscFields(value)
+    const kind = metadata.p ?? "title"
+    const id = metadata.i ?? "0"
+    if (kind === "?") {
+      if (onResponse) onResponse(`\x1b]99;i=${id}:p=?;o=always:p=title,body\x1b\\`)
+      return
+    }
+    if (kind !== "title" && kind !== "body") return
+    const bytes =
+      metadata.e === "1"
+        ? decodeBase64(payload)
+        : Array.from(encoder.encode(payload), (byte) => String.fromCharCode(byte)).join("")
+    if (bytes === null) return
+    const entry = notificationAssembly.get(id) ?? { title: "", body: "" }
+    entry[kind] += bytes
+    if (metadata.d === "0") {
+      notificationAssembly.set(id, entry)
+      return
+    }
+    notificationAssembly.delete(id)
+    const text = (data: string) =>
+      new TextDecoder().decode(Uint8Array.from(data, (character) => character.charCodeAt(0)))
+    const title = text(entry.title)
+    const body = text(entry.body)
+    if (title || body) notifications.push(title && body ? `${title}\n${body}` : title || body)
+  }
+
+  function clipboardResponse(type: string, status: string, requestId: string, extra = "", data?: string): string {
+    return `\x1b]5522;type=${type}:status=${status}${requestId ? `:id=${requestId}` : ""}${extra}${data === undefined || data === "" ? "" : `;${data}`}\x1b\\`
+  }
+
+  function handleClipboard(value: string): void {
+    const { metadata, payload } = oscFields(value)
+    const id = (metadata.id ?? "").replace(/[^a-zA-Z0-9_+.-]/g, "")
+    const reply = (type: string, status: string, requestId: string, extra = "", data?: string) => {
+      if (onResponse) onResponse(clipboardResponse(type, status, requestId, extra, data))
+    }
+    const abortWrite = (status: string) => {
+      if (clipboardWrite) reply("write", status, clipboardWrite.id)
+      clipboardWrite = null
+    }
+    if (metadata.type === "read") {
+      const requested = decodeBase64(payload)
+      if (requested === null) return // Invalid read requests have no protocol error status.
+      if (metadata.loc && metadata.loc !== "clipboard") {
+        reply("read", "ENOSYS", id)
+        return
+      }
+      reply("read", "OK", id)
+      for (const mime of new Set(requested.split(/\s+/))) {
+        if (mime === ".") {
+          reply("read", "DATA", id, ":mime=Lg==", clipboard ? btoa("text/plain\n") : "")
+        } else if (mime === "text/plain") {
+          for (let offset = 0; offset < clipboard.length; offset += 4096) {
+            reply("read", "DATA", id, ":mime=dGV4dC9wbGFpbg==", btoa(clipboard.slice(offset, offset + 4096)))
+          }
+        }
+        // Unavailable MIME types produce no DATA packet, between the mandatory OK/DONE.
+      }
+      reply("read", "DONE", id)
+    } else if (metadata.type === "write") {
+      clipboardWrite = { id, data: "", hasText: false }
+      if (metadata.loc && metadata.loc !== "clipboard") abortWrite("ENOSYS")
+      else if (payload) abortWrite("EINVAL")
+    } else if (metadata.type === "wdata" && clipboardWrite) {
+      if (metadata.mime === undefined) {
+        if (payload) {
+          abortWrite("EINVAL")
+          return
+        }
+        const data = clipboardWrite.hasText ? decodeBase64(clipboardWrite.data) : ""
+        if (data === null) {
+          abortWrite("EINVAL")
+          return
+        }
+        clipboard = data
+        reply("write", "DONE", clipboardWrite.id)
+        clipboardWrite = null
+      } else if (decodeBase64(metadata.mime) === "text/plain") {
+        clipboardWrite.hasText = true
+        clipboardWrite.data += payload
+      } else {
+        abortWrite("EINVAL")
+      }
+    } else if (metadata.type === "walias" && clipboardWrite) {
+      // Only text/plain is supported, so no aliases to other MIME types can be installed.
+      abortWrite("EINVAL")
+    }
+  }
+
+  function finishOSC(): void {
+    if (oscBuf.length > 8192) {
+      if (oscBuf.startsWith("5522;") && clipboardWrite) {
+        const id = clipboardWrite.id
+        clipboardWrite = null
+        if (onResponse) onResponse(clipboardResponse("write", "EINVAL", id))
+      }
+      return
+    }
+    handleOSC(oscBuf)
+    emitOscEvent(oscBuf)
+  }
+
   function handleOSC(oscString: string): void {
     // OSC sequences may have no semicolon (bare resets like "110", "104").
     // Split at the first semicolon if one exists; otherwise treat the whole
@@ -3662,10 +3984,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         break
       case 133: {
         // Semantic prompt markers (FinalTerm / shell integration)
-        // Value format: "X" or "X;params" where X is A/B/C/D
+        // Value format: "X" or "X;params". P starts a prompt at the current position.
         const marker = value.charAt(0)
         switch (marker) {
           case "A": // Start of prompt
+          case "P": // Semantic-prompts StartPrompt (WezTerm dialect)
             semanticZones.push({ type: "prompt", startRow: curY, startCol: curX })
             break
           case "B": // End of prompt / start of command
@@ -3971,6 +4294,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       case 9: // Notifications: OSC 9 ; message ST (iTerm2/ConEmu convention)
         notifications.push(value)
         break
+      case 99:
+        handleNotification(value)
+        break
       case 633: {
         // VS Code shell integration (OSC 633 is a superset of OSC 133)
         // Maps to the same semantic zone model as FinalTerm markers.
@@ -3986,6 +4312,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             semanticZones.push({ type: "output", startRow: curY, startCol: curX })
             break
           case "D":
+            break
+          case "P":
+            if (value.startsWith("P;Cwd=")) cwd = value.substring(6)
             break
         }
         break
@@ -4065,28 +4394,15 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       }
       case 30001:
         // Kitty color stack push.
-        colorStack.push(snapshotColorState())
+        pushColors()
         break
       case 30101: {
         // Kitty color stack pop; empty stack is a no-op.
-        const snapshot = colorStack.pop()
-        if (snapshot) restoreColorState(snapshot)
+        popColors()
         break
       }
       case 5522: {
-        // OSC 5522 — Advanced Clipboard (Kitty clipboard protocol)
-        if (value === "?" && onResponse) {
-          // Query: respond with stored clipboard data
-          const encoded = btoa(advancedClipboard)
-          onResponse(`\x1b]5522;${encoded}\x1b\\`)
-        } else {
-          // Store clipboard data (base64-encoded)
-          try {
-            advancedClipboard = atob(value)
-          } catch {
-            advancedClipboard = ""
-          }
-        }
+        handleClipboard(value)
         break
       }
       case 1337: {
@@ -4128,6 +4444,21 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       } else {
         // Not recognized
         onResponse("\x1bP0$r\x1b\\")
+      }
+      return
+    }
+
+    // XTGETXRES: only the emulator's own terminal identity is a known resource.
+    if (data.startsWith("+Q") && onResponse) {
+      for (const hexName of data.substring(2).split(";")) {
+        if (/^(?:[0-9a-f]{2})+$/i.test(hexName)) {
+          const name = hexName.replace(/../g, (pair) => String.fromCharCode(parseInt(pair, 16)))
+          if (name === "termName") {
+            onResponse(`\x1bP1+R${hexName}=767465726d\x1b\\`)
+            continue
+          }
+        }
+        onResponse(`\x1bP0+R${hexName}\x1b\\`)
       }
       return
     }
@@ -4185,6 +4516,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // ── Soft reset (DECSTR) ──
 
   function softReset(): void {
+    clipboardPasteEvents = false
+    clipboardWrite = null
+    notificationAssembly.clear()
+    reverseWrap = false
+    allowColumnSwitch = true
+    smoothScroll = false
+    attributeChangeExtent = 0
+    sgrStack.length = 0
     // Reset modes to defaults
     insertMode = false
     newLineMode = false
@@ -4227,6 +4566,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // ── Full reset ──
 
   function fullReset(): void {
+    clipboardPasteEvents = false
+    clipboardWrite = null
+    notificationAssembly.clear()
+    reverseWrap = false
+    allowColumnSwitch = true
+    smoothScroll = false
+    attributeChangeExtent = 0
+    sgrStack.length = 0
     mainGrid = makeGrid(cols, rows)
     altGrid = makeGrid(cols, rows)
     grid = mainGrid
@@ -4288,7 +4635,6 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     fontSize = 12
     fontWindowSize = 12
     locale = "en_US.UTF-8"
-    advancedClipboard = ""
     viewportOffset = 0
     charsetG0 = false
     charsetG1 = false
@@ -4497,6 +4843,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           } else if (code === 0x08) {
             // BS - Backspace
             if (curX > 0) curX--
+            else if (reverseWrap && autoWrap && curY > scrollTop) {
+              curY--
+              curX = rowCols(curY) - 1
+            }
             emitExecute(0x08)
           } else if (code === 0x09) {
             // TAB — advance to next tab stop (or last column if none)
@@ -4745,15 +5095,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case "osc":
           if (code === 0x07) {
             // BEL terminates OSC
-            handleOSC(oscBuf)
             parserState = "ground"
-            emitOscEvent(oscBuf)
+            finishOSC()
           } else if (code === 0x1b) {
             // ESC might be start of ST (\x1b\\)
             parserState = "osc_st"
-          } else if (oscBuf.length >= 4096) {
-            parserState = "ground"
-          } else {
+          } else if (oscBuf.length <= 8192) {
+            // A legal OSC 5522 chunk encodes 4096 bytes as 5464 base64 characters.
+            // Keep one overflow sentinel; consume the rest through its terminator.
             oscBuf += ch
           }
           break
@@ -4761,9 +5110,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case "osc_st": {
           // ST (String Terminator) — end of OSC only when the backslash completes ESC \.
           const oscComplete = ch === "\\"
-          if (oscComplete) handleOSC(oscBuf)
           parserState = "ground"
-          if (oscComplete) emitOscEvent(oscBuf)
+          if (oscComplete) finishOSC()
           break
         }
 
@@ -5011,6 +5359,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   }
 
   function resize(newCols: number, newRows: number): void {
+    if (newCols === cols && newRows === rows) return
+    resizeGrid(newCols, newRows)
+    // Only externally applied resizes are separate ops. DECCOLM belongs to its output op.
+    if (opListeners.size > 0) emitOp({ type: "resize", cols: newCols, rows: newRows })
+    flushSignals()
+  }
+
+  function resizeGrid(newCols: number, newRows: number): void {
     // Same-geometry resize is a no-op (xterm parity): reflowing here would
     // clamp a past-the-end deferred-wrap cursor back into the row (so the
     // next byte overwrites the last cell instead of wrapping) and would
@@ -5155,11 +5511,6 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
     clampCursor()
     markAllDirty() // dimensions + reflow changed the whole visible buffer
-
-    // Fire the op tap once for the applied resize (no-op when untapped).
-    if (opListeners.size > 0) emitOp({ type: "resize", cols: newCols, rows: newRows })
-    // Reactive read plane: size$/cursor$ may have changed; damage is "all" (reflow).
-    flushSignals()
   }
 
   // ── Snapshot / restore ──
@@ -5216,6 +5567,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         sgrMouse,
         urxvtMouse,
         pixelMouse,
+        clipboardPasteEvents,
+        reverseWrap,
+        allowColumnSwitch,
+        smoothScroll,
+        attributeChangeExtent,
         focusTracking,
         origin: originMode,
         insert: insertMode,
@@ -5241,6 +5597,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         current: snapshotColorState(),
         stack: colorStack.map(cloneColorStateSnapshot),
       },
+      ...(sgrStack.length ? { sgrStack: sgrStack.map(cloneSgrStackEntry) } : {}),
       tabStops: [...tabStops].sort((a, b) => a - b),
       title,
       iconLabel,
@@ -5326,6 +5683,15 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     sgrMouse = snapshotValue.modes.sgrMouse
     urxvtMouse = snapshotValue.modes.urxvtMouse ?? false
     pixelMouse = snapshotValue.modes.pixelMouse ?? false
+    clipboardPasteEvents = snapshotValue.modes.clipboardPasteEvents ?? false
+    reverseWrap = snapshotValue.modes.reverseWrap ?? false
+    allowColumnSwitch = snapshotValue.modes.allowColumnSwitch ?? true
+    smoothScroll = snapshotValue.modes.smoothScroll ?? false
+    attributeChangeExtent = snapshotValue.modes.attributeChangeExtent ?? 0
+    sgrStack.length = 0
+    for (const entry of snapshotValue.sgrStack ?? []) {
+      sgrStack.push(cloneSgrStackEntry(entry))
+    }
     focusTracking = snapshotValue.modes.focusTracking
     originMode = snapshotValue.modes.origin
     insertMode = snapshotValue.modes.insert
@@ -5385,7 +5751,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     fontSize = 12
     fontWindowSize = 12
     locale = "en_US.UTF-8"
-    advancedClipboard = ""
+    clipboardWrite = null
+    notificationAssembly.clear()
     semanticZones = []
     hasSixel = false
     sixelImages = []
@@ -5532,6 +5899,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   function getMode(mode: string): boolean | null {
     switch (mode) {
+      case "smoothScroll":
+        return smoothScroll
       case "altScreen":
         return useAltScreen
       case "cursorVisible":
@@ -5807,7 +6176,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   }
 
   // Suppress unused variable warnings
-  void [mouseTrackingMode, textScale, advancedClipboard]
+  void [mouseTrackingMode, textScale]
 
   return {
     get cols() {
@@ -5820,7 +6189,16 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       return getSignals()
     },
     process,
-    encodePaste: (text) => encodePaste(text, bracketedPaste),
+    encodePaste: (text) => {
+      if (!clipboardPasteEvents) return encodePaste(text, bracketedPaste)
+      clipboard = Array.from(encoder.encode(text), (byte) => String.fromCharCode(byte)).join("")
+      // No password: this in-memory clipboard has no permission prompt.
+      return encoder.encode(
+        clipboardResponse("read", "OK", "") +
+          clipboardResponse("read", "DATA", "", ":mime=Lg==", clipboard ? btoa("text/plain\n") : "") +
+          clipboardResponse("read", "DONE", ""),
+      )
+    },
     resize,
     apply,
     tapOps,
