@@ -121,7 +121,7 @@ export interface Screen {
   getCursorPosition(): { x: number; y: number }
   getCursorVisible(): boolean
   getTitle(): string
-  /** Copied, ordered ignored OSC commands and numeric SGR operands; no entry means no decision. */
+  /** Copied ignored OSC, SGR, DECSET/DECRST and CSI #P/#Q reports; no entry means no decision. */
   getUnhandledSequences(): readonly { readonly kind: "osc" | "csi"; readonly code: string }[]
   getMode(mode: string): boolean | null
   getScrollbackLength(): number
@@ -187,9 +187,9 @@ export function createScreen(opts: ScreenOptions): Screen {
   let oscBuf = ""
   const unhandledSequences: { readonly kind: "osc" | "csi"; readonly code: string }[] = []
 
-  function recordUnhandledSequence(kind: "osc" | "csi", code: number): void {
-    if (!Number.isSafeInteger(code) || code < 0) return
-    unhandledSequences.push({ kind, code: kind === "csi" ? String(code) + "m" : String(code) })
+  function recordUnhandledSequence(kind: "osc" | "csi", code: number | string): void {
+    if (typeof code === "number" && (!Number.isSafeInteger(code) || code < 0)) return
+    unhandledSequences.push({ kind, code: String(code) + (kind === "csi" && typeof code === "number" ? "m" : "") })
     if (unhandledSequences.length > UNHANDLED_SEQUENCE_LIMIT * 2) {
       unhandledSequences.splice(0, unhandledSequences.length - UNHANDLED_SEQUENCE_LIMIT)
     }
@@ -454,6 +454,8 @@ export function createScreen(opts: ScreenOptions): Screen {
         case 66: // DECNKM - Application Keypad
           applicationKeypad = set
           break
+        default:
+          if (Number.isSafeInteger(code)) recordUnhandledSequence("csi", `?${code}${finalByte}`)
       }
     }
   }
@@ -739,6 +741,8 @@ export function createScreen(opts: ScreenOptions): Screen {
             // Final byte — dispatch CSI
             if (escBuf.startsWith("?")) {
               handleCSIPrivate(escBuf.substring(1), ch)
+            } else if (escBuf === "#" && (ch === "P" || ch === "Q")) {
+              recordUnhandledSequence("csi", `#${ch}`)
             } else if (ch === "h" || ch === "l") {
               // Standard set/reset mode (non-private)
               handleSetResetMode(escBuf, ch)

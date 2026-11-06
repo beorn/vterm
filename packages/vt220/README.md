@@ -34,8 +34,10 @@ Snapshots retain the historical mode set; paste encoding adds no stored state.
 
 `getUnhandledSequences()` returns copied, ordered reports from the engine's
 existing ignore paths: `{ kind: "osc", code: "777" }` for a completed OSC command,
-or `{ kind: "csi", code: "3m" }` for each ignored numeric SGR operand. It records
-only non-negative safe integers, normalized without leading zeros, never payloads
+or `{ kind: "csi", code: "3m" }` for each ignored numeric SGR operand. Ignored
+DECSET/DECRST parameters add one entry each (`?1000h`/`?1000l`); ignored CSI #P/#Q
+add `#P`/`#Q`. Handled mode parameters and other private/intermediate commands
+add no entry. Numeric command values are non-negative safe integers, normalized without leading zeros, never payloads
 or reconstructed input. Colon groups have already lost their numeric identity
 and produce no report. Incomplete, malformed or overflowing OSC input also
 produces none. An empty report makes no support decision.

@@ -61,6 +61,32 @@ function createScreen(opts: {
 }
 
 describe("Vt100Screen", () => {
+  // @failure Native ignored mode/colour-stack commands are silent, or handled/query paths are falsely reported.
+  // @level l0 @consumer Public ignored-sequence readers, including controlled Terminfo negatives.
+  test("reports each ignored private mode and colour-stack command without reporting handled modes or queries", () => {
+    const screen = createVt100Screen({ cols: 12, rows: 2 })
+    const feed = (text: string) => screen.process(new TextEncoder().encode(text))
+    feed("\x1b[?7l")
+    expect(screen.getMode("autoWrap")).toBe(false)
+    expect(screen.getUnhandledSequences()).toEqual([])
+    feed("\x1b[?7;1000;1006h\x1b[?1000l\x1b[?20")
+    expect(screen.getMode("autoWrap")).toBe(true)
+    expect(screen.getUnhandledSequences()).toEqual([
+      { kind: "csi", code: "?1000h" },
+      { kind: "csi", code: "?1006h" },
+      { kind: "csi", code: "?1000l" },
+    ])
+    feed("04h\x1b[#P\x1b[#Q")
+    expect(screen.getUnhandledSequences().slice(3)).toEqual([
+      { kind: "csi", code: "?2004h" },
+      { kind: "csi", code: "#P" },
+      { kind: "csi", code: "#Q" },
+    ])
+    feed("\x1b[?7$p\x1b[?1000$h\x1b[?9007199254740992h\x1b[#R\x1b[#{\x1b[#}\x1b[?1;5;6;7;66l")
+    expect(screen.getUnhandledSequences()).toHaveLength(6)
+    expect(screen.getMode("autoWrap")).toBe(false)
+  })
+
   // @failure Ignored input cannot be distinguished from absent evidence, or mutates retained history.
   // @level l0
   // @consumer Public VT100 report readers, including the Termless adapter.

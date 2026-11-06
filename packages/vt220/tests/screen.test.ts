@@ -795,6 +795,31 @@ test("mode readback distinguishes tracked set/reset from an untracked mode", () 
 // @failure Ignored input is reported as handled, invented from discarded syntax, or retained without a bound.
 // @level l0 @consumer Public VT220 diagnostics and the Termless report forwarder.
 describe("ignored OSC commands and SGR operands", () => {
+  // @failure Native ignored mode/colour-stack commands are silent, or handled/query paths are falsely reported.
+  // @level l0 @consumer Public ignored-sequence readers, including controlled Terminfo negatives.
+  test("reports each ignored private mode and colour-stack command without reporting handled modes or queries", () => {
+    const screen = createVt220Screen({ cols: 12, rows: 2 })
+    feedStr(screen, "\x1b[?7l")
+    expect(screen.getMode("autoWrap")).toBe(false)
+    expect(screen.getUnhandledSequences()).toEqual([])
+    feedStr(screen, "\x1b[?7;1000;1006h\x1b[?1000l\x1b[?20")
+    expect(screen.getMode("autoWrap")).toBe(true)
+    expect(screen.getUnhandledSequences()).toEqual([
+      { kind: "csi", code: "?1000h" },
+      { kind: "csi", code: "?1006h" },
+      { kind: "csi", code: "?1000l" },
+    ])
+    feedStr(screen, "04h\x1b[#P\x1b[#Q")
+    expect(screen.getUnhandledSequences().slice(3)).toEqual([
+      { kind: "csi", code: "?2004h" },
+      { kind: "csi", code: "#P" },
+      { kind: "csi", code: "#Q" },
+    ])
+    feedStr(screen, "\x1b[?7$p\x1b[?1000$h\x1b[?9007199254740992h\x1b[#R\x1b[#{\x1b[#}\x1b[?1;5;6;7;25;66l")
+    expect(screen.getUnhandledSequences()).toHaveLength(6)
+    expect(screen.getMode("autoWrap")).toBe(false)
+  })
+
   test("reports ignored numeric operands beside an applied handled control", () => {
     const screen = createVt220Screen({ cols: 20, rows: 4 })
     feedStr(screen, "\x1b[1mA")

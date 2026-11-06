@@ -82,6 +82,7 @@ export interface Screen {
   encodePaste(text: string): Uint8Array
   resize(cols: number, rows: number): void
   reset(): void
+  /** Copied ignored OSC, SGR, DECSET/DECRST and CSI #P/#Q reports; no entry means no decision. */
   getUnhandledSequences(): readonly { readonly kind: "osc" | "csi"; readonly code: string }[]
   getCell(row: number, col: number): ScreenCell
   getLine(row: number): ScreenCell[]
@@ -352,6 +353,8 @@ export function createScreen(opts: ScreenOptions): Screen {
         case 66: // DECNKM - Application Keypad
           applicationKeypad = set
           break
+        default:
+          if (Number.isSafeInteger(code)) recordUnhandled("csi", `?${code}${finalByte}`)
       }
     }
   }
@@ -436,9 +439,9 @@ export function createScreen(opts: ScreenOptions): Screen {
     }
   }
 
-  function recordUnhandled(kind: "osc" | "csi", code: number): void {
-    if (!Number.isSafeInteger(code) || code < 0) return
-    unhandledSequences.push({ kind, code: String(code) + (kind === "csi" ? "m" : "") })
+  function recordUnhandled(kind: "osc" | "csi", code: number | string): void {
+    if (typeof code === "number" && (!Number.isSafeInteger(code) || code < 0)) return
+    unhandledSequences.push({ kind, code: String(code) + (kind === "csi" && typeof code === "number" ? "m" : "") })
     if (unhandledSequences.length > UNHANDLED_SEQUENCE_LIMIT * 2) {
       unhandledSequences.splice(0, unhandledSequences.length - UNHANDLED_SEQUENCE_LIMIT)
     }
@@ -570,6 +573,8 @@ export function createScreen(opts: ScreenOptions): Screen {
             // Final byte — dispatch CSI
             if (escBuf.startsWith("?")) {
               handleCSIPrivate(escBuf.substring(1), ch)
+            } else if (escBuf === "#" && (ch === "P" || ch === "Q")) {
+              recordUnhandled("csi", `#${ch}`)
             } else {
               handleCSI(escBuf, ch)
             }

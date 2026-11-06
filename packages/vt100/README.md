@@ -73,14 +73,17 @@ console.log(screen.getCursorPosition()) // { x: 18, y: 0 }
 | `scrollViewport(delta)`        | Scroll viewport                               |
 | `resize(cols, rows)`           | Resize terminal                               |
 | `reset()`                      | Reset to initial state                        |
-| `getUnhandledSequences()`      | Copy ignored OSC identifiers and SGR operands |
+| `getUnhandledSequences()`      | Copy ignored OSC, SGR and mode/stack commands |
 
 ### Ignored-sequence reports
 
 `getUnhandledSequences()` returns copied, ordered `{ kind: "osc" | "csi", code: string }`
 entries. OSC reports contain only the decimal command number after a complete BEL
 or ST terminator, never its payload. Ignored SGR operands contain their native
-decimal value and `m`, such as `3m`. Codes must be non-negative safe integers.
+decimal value and `m`, such as `3m`. Ignored DECSET/DECRST parameters produce
+one entry each, such as `?1000h` or `?1000l`; ignored CSI #P/#Q produce `#P`/`#Q`.
+Handled mode parameters and other private/intermediate commands add no entry.
+Numeric command values must be non-negative safe integers.
 Colon groups, invalid or oversized numbers, incomplete/overflowed OSC strings and
 malformed terminators produce no entry. Missing entries prove no support outcome.
 
