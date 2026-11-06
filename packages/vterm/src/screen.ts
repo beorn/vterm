@@ -260,6 +260,8 @@ export interface Snapshot {
     clipboardPasteEvents?: boolean
     /** Absent in older version-1 snapshots: reset. */
     reverseWrap?: boolean
+    /** ?40 column switching gate; absent in older snapshots means open. */
+    allowColumnSwitch?: boolean
     smoothScroll?: boolean
     /** DECSACE: 0/1 stream, 2 rectangle; legacy absence means 0. */
     attributeChangeExtent?: 0 | 1 | 2
@@ -1337,6 +1339,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   // Additional DEC/xterm private modes we track (and report via DECRPM)
   let decColumnMode = false // ?3 — DECCOLM (80/132 columns).
+  let allowColumnSwitch = true // ?40 — preserve legacy ?3 behaviour unless explicitly closed.
   let altScrollMode = false // ?1007
   let utf8MouseMode = false // ?1005
   // Kept outside Snapshot: a restored snapshot starts with nothing saved.
@@ -1599,7 +1602,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       assertBoolean(`modes.${name}`, modes[name])
     }
     assertInteger("modes.mouseTrackingMode", modes.mouseTrackingMode)
-    for (const name of ["urxvtMouse", "pixelMouse", "reverseWrap", "smoothScroll", "clipboardPasteEvents"]) {
+    for (const name of [
+      "urxvtMouse",
+      "pixelMouse",
+      "reverseWrap",
+      "smoothScroll",
+      "clipboardPasteEvents",
+      "allowColumnSwitch",
+    ]) {
       if (Object.hasOwn(modes, name)) assertBoolean(`modes.${name}`, modes[name])
     }
     if (Object.hasOwn(modes, "attributeChangeExtent") && ![0, 1, 2].includes(modes.attributeChangeExtent as number)) {
@@ -3043,6 +3053,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         return newLineMode
       case 3:
         return decColumnMode
+      case 40:
+        return allowColumnSwitch
       case 1005:
         return utf8MouseMode
       case 1007:
@@ -3062,6 +3074,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         break
       case 45:
         reverseWrap = set
+        break
+      case 40:
+        allowColumnSwitch = set
         break
       case 1: // DECCKM - Application Cursor
         applicationCursor = set
@@ -3164,6 +3179,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         colorSchemeReporting = set
         break
       case 3: // DECCOLM — clear the page, select 80/132 columns and home.
+        if (!allowColumnSwitch) break
         decColumnMode = set
         for (let row = 0; row < rows; row++) {
           eraseCells(row, 0, row, cols - 1)
@@ -4504,6 +4520,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     clipboardWrite = null
     notificationAssembly.clear()
     reverseWrap = false
+    allowColumnSwitch = true
     smoothScroll = false
     attributeChangeExtent = 0
     sgrStack.length = 0
@@ -4553,6 +4570,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     clipboardWrite = null
     notificationAssembly.clear()
     reverseWrap = false
+    allowColumnSwitch = true
     smoothScroll = false
     attributeChangeExtent = 0
     sgrStack.length = 0
@@ -5551,6 +5569,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         pixelMouse,
         clipboardPasteEvents,
         reverseWrap,
+        allowColumnSwitch,
         smoothScroll,
         attributeChangeExtent,
         focusTracking,
@@ -5666,6 +5685,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     pixelMouse = snapshotValue.modes.pixelMouse ?? false
     clipboardPasteEvents = snapshotValue.modes.clipboardPasteEvents ?? false
     reverseWrap = snapshotValue.modes.reverseWrap ?? false
+    allowColumnSwitch = snapshotValue.modes.allowColumnSwitch ?? true
     smoothScroll = snapshotValue.modes.smoothScroll ?? false
     attributeChangeExtent = snapshotValue.modes.attributeChangeExtent ?? 0
     sgrStack.length = 0

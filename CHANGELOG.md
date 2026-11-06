@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- DECCOLM honours the ?40 column-switching gate. The gate starts open for
+  compatibility with existing callers; a real terminal may start it closed.
+  A closed gate leaves the screen untouched. Snapshots preserve the gate.
 - OSC 99 delivers completed title/body notifications through getNotifications.
   OSC 5522 implements text/plain transfers using the same clipboard as OSC 52.
   With mode 5522 set, encodePaste(text) updates that clipboard and returns a
