@@ -47,6 +47,47 @@ function roundTrip(snapshot: Snapshot): Snapshot {
   return decoded
 }
 
+describe("snapshot-codec — ordinary mode and SGR continuation", () => {
+  test("restores modes and selected SGR pushes, with legacy absence resetting defaults", () => {
+    const source = mkScreen(8, 3)
+    feed(source, "\x1b[?45h\x1b[?4h\x1b[2*x\x1b[1m\x1b[#{\x1b[22m")
+    const snapshot = roundTrip(source.snapshot())
+    const restored = mkScreen(8, 3)
+    restored.restore(snapshot)
+    feed(restored, "\x1b[2;1H\b")
+    expect(restored.getCursor()).toEqual({ row: 0, col: 7 })
+    expect(restored.getMode("smoothScroll")).toBe(true)
+    feed(restored, "\x1b[#}X")
+    expect(restored.getCell(0, 7).bold).toBe(true)
+    Reflect.deleteProperty(snapshot.modes, "reverseWrap")
+    Reflect.deleteProperty(snapshot.modes, "smoothScroll")
+    Reflect.deleteProperty(snapshot.modes, "attributeChangeExtent")
+    Reflect.deleteProperty(snapshot, "sgrStack")
+    restored.restore(roundTrip(snapshot))
+    feed(restored, "\x1b[2;1H\b\x1b[#}X")
+    expect(restored.getCell(1, 0).bold).toBe(false)
+    expect(restored.getMode("smoothScroll")).toBe(false)
+    expect(Object.hasOwn(restored.snapshot(), "sgrStack")).toBe(false)
+  })
+
+  test("limits SGR stack depth and rejects over-depth snapshots before mutation", () => {
+    const screen = mkScreen(8, 3)
+    feed(screen, "\x1b[#{".repeat(11))
+    const snapshot = screen.snapshot()
+    const entries = Reflect.get(snapshot, "sgrStack") as unknown[]
+    expect(entries).toHaveLength(10)
+    Reflect.set(
+      snapshot,
+      "sgrStack",
+      Array.from({ length: 11 }, () => entries[0]),
+    )
+    const target = mkScreen(8, 3)
+    feed(target, "KEEP")
+    expect(() => target.restore(snapshot)).toThrow(/sgrStack/)
+    expect(target.getCell(0, 0).char).toBe("K")
+  })
+})
+
 describe("snapshot-codec — independent icon label", () => {
   // Optional v1 header state must preserve own absence rather than apply restore's fallback.
   test("distinct, empty and legacy-absent labels round-trip without normalization", () => {

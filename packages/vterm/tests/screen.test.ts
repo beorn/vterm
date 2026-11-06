@@ -1195,6 +1195,25 @@ describe("editing operations", () => {
 // ═══════════════════════════════════════════════════════
 
 describe("mode management", () => {
+  test("reverse wrap backspace requires mode 45 and autowrap", () => {
+    const screen = screenWith("\x1b[2;1H\b", { cols: 10, rows: 3 })
+    expect(screen.getCursor()).toMatchObject({ row: 1, col: 0 })
+    screen.process(enc.encode("\x1b[?45h\b"))
+    expect(screen.getCursor()).toMatchObject({ row: 0, col: 9 })
+    screen.process(enc.encode("\x1b[?7l\x1b[2;1H\b"))
+    expect(screen.getCursor()).toMatchObject({ row: 1, col: 0 })
+  })
+
+  test("SGR stack restores nested and selected video attributes without restoring protection", () => {
+    const screen = screenWith("\x1b[1m\x1b[#{\x1b[22;3m\x1b[#{\x1b[23m\x1b[#}A\x1b[#}B")
+    expect(screen.getCell(0, 0)).toMatchObject({ bold: false, italic: true })
+    expect(screen.getCell(0, 1)).toMatchObject({ bold: true, italic: false })
+    screen.process(enc.encode('\x1b[1#p\x1b[22;3m\x1b[1"q\x1b[#}C'))
+    expect(screen.getCell(0, 2)).toMatchObject({ bold: true, italic: true, protected: true })
+    screen.process(enc.encode("\x1b[#}D"))
+    expect(screen.getCell(0, 3)).toMatchObject({ bold: true, italic: true })
+  })
+
   test.each([47, 1047])("alternate mode %i preserves main, and only 1047 clears alt on exit", (mode) => {
     const screen = screenWith(`MAIN\x1b[?${mode}h\x1b[HALT\x1b[?${mode}l`)
     expect(screen.getCell(0, 0).char).toBe("M")
@@ -1450,12 +1469,17 @@ describe("insert mode", () => {
   // @failure DECRQM ?4 reports ANSI IRM instead of the unsupported DECSCLM mode.
   // @level l0
   // @consumer Terminal applications querying DEC private mode support.
-  test.each([false, true])("DEC private 4 query is unrecognized with ANSI insert mode %s", (insert) => {
+  test.each([false, true])("smooth-scroll mode set/query/reset is independent of ANSI insert mode %s", (insert) => {
     const replies: string[] = []
     const screen = createVtermScreen({ onResponse: (reply) => replies.push(reply) })
     if (insert) screen.process(enc.encode("\x1b[4h"))
-    screen.process(enc.encode("\x1b[?4$p"))
-    expect(replies).toEqual(["\x1b[?4;0$y"])
+    screen.process(enc.encode("\x1b[?4h\x1b[?4$p"))
+    expect(screen.getMode("smoothScroll")).toBe(true)
+    expect(screen.getMode("insertMode")).toBe(insert)
+    screen.process(enc.encode("\x1b[?4l\x1b[?4$p"))
+    expect(screen.getMode("smoothScroll")).toBe(false)
+    expect(screen.getMode("insertMode")).toBe(insert)
+    expect(replies).toEqual(["\x1b[?4;1$y", "\x1b[?4;2$y"])
   })
 
   test("insert mode shifts characters right", () => {

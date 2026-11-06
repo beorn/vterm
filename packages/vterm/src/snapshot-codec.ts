@@ -117,6 +117,7 @@ interface SnapshotHeader {
   modes: Snapshot["modes"]
   margins: Snapshot["margins"]
   colors: Snapshot["colors"]
+  sgrStack?: Snapshot["sgrStack"]
   tabStops: number[]
   title: string
   /** Additive v1 JSON key; absence must remain absent until the screen restores it. */
@@ -695,6 +696,7 @@ export function encodeScreenSnapshotBinary(snapshot: Snapshot): Uint8Array {
     lineAttrs: snapshot.lineAttrs,
     margins: snapshot.margins,
     colors: snapshot.colors,
+    ...(Object.hasOwn(snapshot, "sgrStack") ? { sgrStack: snapshot.sgrStack } : {}),
     tabStops: snapshot.tabStops,
     title: snapshot.title,
     ...(Object.hasOwn(snapshot, "iconLabel") ? { iconLabel: snapshot.iconLabel } : {}),
@@ -774,6 +776,7 @@ export function decodeScreenSnapshotBinary(bytes: Uint8Array): Snapshot {
     lineAttrs: header.lineAttrs,
     margins: header.margins,
     colors: header.colors,
+    ...(Object.hasOwn(header, "sgrStack") ? { sgrStack: header.sgrStack } : {}),
     tabStops: header.tabStops,
     title: header.title,
     ...(Object.hasOwn(header, "iconLabel") ? { iconLabel: header.iconLabel } : {}),

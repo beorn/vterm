@@ -255,6 +255,11 @@ export interface Snapshot {
     /** Independent encoding flags; absent in older version-1 snapshots means reset. */
     urxvtMouse?: boolean
     pixelMouse?: boolean
+    /** Absent in older version-1 snapshots: reset. */
+    reverseWrap?: boolean
+    smoothScroll?: boolean
+    /** DECSACE: 0/1 stream, 2 rectangle; legacy absence means 0. */
+    attributeChangeExtent?: 0 | 1 | 2
     focusTracking: boolean
     origin: boolean
     insert: boolean
@@ -281,6 +286,8 @@ export interface Snapshot {
     current: ScreenColorStateSnapshot
     stack: ScreenColorStateSnapshot[]
   }
+  /** Additive v1 header state. Absent means no saved SGR attributes; depth at most 10. */
+  sgrStack?: { attrs: Omit<ScreenAttrsSnapshot, "protected" | "url">; parameters: number[] }[]
   tabStops: number[]
   title: string
   /** Independent icon label. Legacy absence restores from title; a supplied value must be a string. XTWINOPS 22/23 title/icon stacks are deliberately not snapshotted (`restore()` clears them). */
@@ -1262,6 +1269,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let applicationCursor = false
   let applicationKeypad = false
   let autoWrap = true
+  let reverseWrap = false
+  let smoothScroll = false
+  let attributeChangeExtent: 0 | 1 | 2 = 0
+  const sgrStack: NonNullable<Snapshot["sgrStack"]> = []
   let mouseTracking = false
   let mouseTrackingMode = 0 // 9, 1000, 1002, 1003
   let sgrMouse = false
@@ -1323,6 +1334,15 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   type ColorStateSnapshot = ScreenColorStateSnapshot
   const colorStack: ColorStateSnapshot[] = []
 
+  function pushColors(maxDepth = Infinity): void {
+    if (colorStack.length < maxDepth) colorStack.push(snapshotColorState())
+  }
+
+  function popColors(): void {
+    const snapshot = colorStack.pop()
+    if (snapshot) restoreColorState(snapshot)
+  }
+
   function cloneColor(c: Color | null): Color | null {
     return c ? { ...c } : null
   }
@@ -1374,6 +1394,20 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       fg: cloneColor(source.fg),
       bg: cloneColor(source.bg),
       underlineColor: cloneColor(source.underlineColor),
+    }
+  }
+
+  function cloneSgrStackEntry(
+    entry: NonNullable<Snapshot["sgrStack"]>[number],
+  ): NonNullable<Snapshot["sgrStack"]>[number] {
+    return {
+      attrs: {
+        ...entry.attrs,
+        fg: cloneColor(entry.attrs.fg),
+        bg: cloneColor(entry.attrs.bg),
+        underlineColor: cloneColor(entry.attrs.underlineColor),
+      },
+      parameters: [...entry.parameters],
     }
   }
 
@@ -1544,8 +1578,41 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       assertBoolean(`modes.${name}`, modes[name])
     }
     assertInteger("modes.mouseTrackingMode", modes.mouseTrackingMode)
-    for (const name of ["urxvtMouse", "pixelMouse"]) {
+    for (const name of ["urxvtMouse", "pixelMouse", "reverseWrap", "smoothScroll"]) {
       if (Object.hasOwn(modes, name)) assertBoolean(`modes.${name}`, modes[name])
+    }
+    if (Object.hasOwn(modes, "attributeChangeExtent") && ![0, 1, 2].includes(modes.attributeChangeExtent as number)) {
+      throw new TypeError("Invalid vterm snapshot modes.attributeChangeExtent")
+    }
+    if (Object.hasOwn(value, "sgrStack")) {
+      if (!Array.isArray(value.sgrStack) || value.sgrStack.length > 10) {
+        throw new TypeError("Invalid vterm snapshot sgrStack")
+      }
+      for (const entry of value.sgrStack) {
+        assertRecord("sgrStack entry", entry)
+        assertRecord("sgrStack attrs", entry.attrs)
+        if (Object.hasOwn(entry.attrs, "protected") || Object.hasOwn(entry.attrs, "url")) {
+          throw new TypeError("Invalid vterm snapshot sgrStack non-SGR attributes")
+        }
+        for (const key of ["bold", "faint", "italic", "blink", "inverse", "hidden", "overline", "strikethrough"]) {
+          assertBoolean(`sgrStack attrs.${key}`, entry.attrs[key])
+        }
+        if (!["none", "single", "double", "curly", "dotted", "dashed"].includes(entry.attrs.underline as string)) {
+          throw new TypeError("Invalid vterm snapshot sgrStack underline")
+        }
+        for (const key of ["fg", "bg", "underlineColor"]) {
+          const color = entry.attrs[key]
+          if (color !== null) {
+            assertRecord(`sgrStack ${key}`, color)
+            for (const channel of ["r", "g", "b"]) {
+              assertInteger("sgrStack color channel", color[channel])
+              if ((color[channel] as number) > 255) throw new TypeError("Invalid vterm snapshot sgrStack color")
+            }
+          }
+        }
+        if (!Array.isArray(entry.parameters)) throw new TypeError("Invalid vterm snapshot sgrStack parameters")
+        for (const parameter of entry.parameters) assertInteger("sgrStack parameter", parameter)
+      }
     }
     assertInteger("modes.kittyKeyboardFlags", modes.kittyKeyboardFlags)
     if (!Array.isArray(modes.kittyKeyboardStack)) {
@@ -2328,6 +2395,74 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   function handleCSI(params: string, intermediates: string, finalByte: string): void {
     const parts = params.split(";").map((s) => (s === "" ? 0 : parseInt(s, 10)))
 
+    if (intermediates === "#") {
+      if (finalByte === "P" || finalByte === "Q") {
+        // Indexed palette slots are not implemented; CSI and OSC share the dense stack.
+        for (const parameter of parts) {
+          if (parameter !== 0) continue
+          if (finalByte === "P") pushColors(10)
+          else popColors()
+        }
+      } else if (finalByte === "R") {
+        // Report active depth. Unlike xterm's retained slots, this stack has no high-water mark.
+        if (onResponse) onResponse(`\x1b[?${colorStack.length};${colorStack.length}#Q`)
+      } else if ((finalByte === "{" || finalByte === "p") && sgrStack.length < 10) {
+        const { protected: _protection, url: _url, ...savedAttrs } = cloneAttrsSnapshot(attrs)
+        sgrStack.push({ attrs: savedAttrs, parameters: params === "" ? [] : parts })
+      } else if (finalByte === "}") {
+        const entry = sgrStack.pop()
+        if (entry) {
+          const saved = entry.attrs
+          if (entry.parameters.length === 0 || entry.parameters.includes(0)) {
+            attrs = {
+              ...attrs,
+              ...saved,
+              fg: cloneColor(saved.fg),
+              bg: cloneColor(saved.bg),
+              underlineColor: cloneColor(saved.underlineColor),
+            }
+          } else {
+            for (const parameter of entry.parameters) {
+              switch (parameter) {
+                case 1:
+                  attrs.bold = saved.bold
+                  break
+                case 2:
+                  attrs.faint = saved.faint
+                  break
+                case 3:
+                  attrs.italic = saved.italic
+                  break
+                case 4:
+                case 21:
+                  attrs.underline = saved.underline
+                  break
+                case 5:
+                  attrs.blink = saved.blink
+                  break
+                case 7:
+                  attrs.inverse = saved.inverse
+                  break
+                case 8:
+                  attrs.hidden = saved.hidden
+                  break
+                case 9:
+                  attrs.strikethrough = saved.strikethrough
+                  break
+                case 30:
+                  attrs.fg = cloneColor(saved.fg)
+                  break
+                case 31:
+                  attrs.bg = cloneColor(saved.bg)
+                  break
+              }
+            }
+          }
+        }
+      }
+      return
+    }
+
     // CSI with intermediates
     if (intermediates === " ") {
       if (finalByte === "q") {
@@ -2462,8 +2597,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         const reverse = finalByte === "t"
         for (let row = t; row <= b && row < rows; row++) {
           const gr = itemAt(grid, row, "rectangular attribute rows")
-          for (let col = l; col <= r && col < cols; col++) {
+          const start = attributeChangeExtent === 2 || row === t ? l : 0
+          const end = attributeChangeExtent === 2 || row === b ? r : cols - 1
+          for (let col = start; col <= end && col < cols; col++) {
             const cell = gr.getCellRaw(col)
+            if (cell.char === "") {
+              if (attributeChangeExtent !== 2) continue
+              cell.char = " "
+            }
             applyRectAttrs(cell, sgrParts, reverse)
             gr.setCellRaw(col, cell)
           }
@@ -2504,7 +2645,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         const hex = sum.toString(16).toUpperCase().padStart(4, "0")
         if (onResponse) onResponse(`\x1bP${pid}!~${hex}\x1b\\`)
       } else if (finalByte === "x") {
-        // DECSACE — Select Attribute Change Extent (stream vs rectangle). Consumed only.
+        const extent = parts[0] ?? 0
+        if (extent === 0 || extent === 1 || extent === 2) attributeChangeExtent = extent
       }
       return
     }
@@ -2832,6 +2974,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   function privateModeState(mode: number): boolean | null {
     switch (mode) {
+      case 4:
+        return smoothScroll
+      case 45:
+        return reverseWrap
       case 1:
         return applicationCursor
       case 6:
@@ -2884,6 +3030,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   function applyPrivateMode(code: number, set: boolean): void {
     switch (code) {
+      case 4:
+        smoothScroll = set
+        break
+      case 45:
+        reverseWrap = set
+        break
       case 1: // DECCKM - Application Cursor
         applicationCursor = set
         break
@@ -4065,12 +4217,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       }
       case 30001:
         // Kitty color stack push.
-        colorStack.push(snapshotColorState())
+        pushColors()
         break
       case 30101: {
         // Kitty color stack pop; empty stack is a no-op.
-        const snapshot = colorStack.pop()
-        if (snapshot) restoreColorState(snapshot)
+        popColors()
         break
       }
       case 5522: {
@@ -4200,6 +4351,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // ── Soft reset (DECSTR) ──
 
   function softReset(): void {
+    reverseWrap = false
+    smoothScroll = false
+    attributeChangeExtent = 0
+    sgrStack.length = 0
     // Reset modes to defaults
     insertMode = false
     newLineMode = false
@@ -4242,6 +4397,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // ── Full reset ──
 
   function fullReset(): void {
+    reverseWrap = false
+    smoothScroll = false
+    attributeChangeExtent = 0
+    sgrStack.length = 0
     mainGrid = makeGrid(cols, rows)
     altGrid = makeGrid(cols, rows)
     grid = mainGrid
@@ -4512,6 +4671,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           } else if (code === 0x08) {
             // BS - Backspace
             if (curX > 0) curX--
+            else if (reverseWrap && autoWrap && curY > scrollTop) {
+              curY--
+              curX = rowCols(curY) - 1
+            }
             emitExecute(0x08)
           } else if (code === 0x09) {
             // TAB — advance to next tab stop (or last column if none)
@@ -5231,6 +5394,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         sgrMouse,
         urxvtMouse,
         pixelMouse,
+        reverseWrap,
+        smoothScroll,
+        attributeChangeExtent,
         focusTracking,
         origin: originMode,
         insert: insertMode,
@@ -5256,6 +5422,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         current: snapshotColorState(),
         stack: colorStack.map(cloneColorStateSnapshot),
       },
+      ...(sgrStack.length ? { sgrStack: sgrStack.map(cloneSgrStackEntry) } : {}),
       tabStops: [...tabStops].sort((a, b) => a - b),
       title,
       iconLabel,
@@ -5341,6 +5508,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     sgrMouse = snapshotValue.modes.sgrMouse
     urxvtMouse = snapshotValue.modes.urxvtMouse ?? false
     pixelMouse = snapshotValue.modes.pixelMouse ?? false
+    reverseWrap = snapshotValue.modes.reverseWrap ?? false
+    smoothScroll = snapshotValue.modes.smoothScroll ?? false
+    attributeChangeExtent = snapshotValue.modes.attributeChangeExtent ?? 0
+    sgrStack.length = 0
+    for (const entry of snapshotValue.sgrStack ?? []) {
+      sgrStack.push(cloneSgrStackEntry(entry))
+    }
     focusTracking = snapshotValue.modes.focusTracking
     originMode = snapshotValue.modes.origin
     insertMode = snapshotValue.modes.insert
@@ -5547,6 +5721,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   function getMode(mode: string): boolean | null {
     switch (mode) {
+      case "smoothScroll":
+        return smoothScroll
       case "altScreen":
         return useAltScreen
       case "cursorVisible":

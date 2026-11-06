@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- vterm.js implements reverse wraparound, smooth-scroll mode readback, SGR
+  push/pop and the non-indexed CSI color stack using its existing palette store.
+  New mode and SGR stack snapshot fields are optional version-1 header members;
+  older snapshots restore their reset defaults.
+- DECSACE now defaults to stream extent (0), so multi-row DECCARA/DECRARA
+  affect the cells from start to end. Send CSI 2 * x for rectangular extent.
+  Indexed palette slots remain unimplemented; color stack reports active depth.
+
 ## 0.13.2
 
 - vterm.js now implements `XTSAVE` (`CSI ? Pm s`) and `XTRESTORE` (`CSI ? Pm r`)

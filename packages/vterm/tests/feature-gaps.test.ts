@@ -141,6 +141,23 @@ describe("OSC 30001/30101 — Kitty color stack", () => {
   })
 })
 
+describe("CSI color stack", () => {
+  test("push/pop restores a nondefault palette and reports actual stack depth", () => {
+    const { responses, feed } = makeScreen()
+    feed("\x1b]4;1;rgb:12/34/56\x07\x1b[#P\x1b[#R")
+    feed("\x1b]4;1;rgb:ab/cd/ef\x07\x1b[#P\x1b[#R")
+    feed("\x1b]4;1;rgb:ff/ff/ff\x07\x1b[#Q\x1b]4;1;?\x07")
+    feed("\x1b[#Q\x1b]4;1;?\x07\x1b[#R")
+    expect(responses).toEqual([
+      "\x1b[?1;1#Q",
+      "\x1b[?2;2#Q",
+      "\x1b]4;1;rgb:abab/cdcd/efef\x1b\\",
+      "\x1b]4;1;rgb:1212/3434/5656\x1b\\",
+      "\x1b[?0;0#Q",
+    ])
+  })
+})
+
 describe("OSC 21 — Kitty key=value colors", () => {
   test("multiple queries yield joined response", () => {
     const { responses, feed } = makeScreen()
@@ -225,6 +242,18 @@ describe("DECALN (ESC # 8)", () => {
 // ── Rectangular area ops ──
 
 describe("rectangular area operations", () => {
+  test("DECSACE selects stream versus rectangle attribute extent", () => {
+    const { screen, feed } = makeScreen({ cols: 6, rows: 3 })
+    feed("ABCDEF\r\nGHIJKL\r\nMNOPQR")
+    feed("\x1b[2*x\x1b[1;3;3;4;7$r")
+    expect(screen.getCell(0, 4).inverse).toBe(false)
+    expect(screen.getCell(1, 0).inverse).toBe(false)
+    feed("\x1b[0*x\x1b[1;3;3;4;7$r")
+    expect(screen.getCell(0, 4).inverse).toBe(true)
+    expect(screen.getCell(1, 0).inverse).toBe(true)
+    expect(screen.getCell(2, 4).inverse).toBe(false)
+  })
+
   test("DECFRA fills rectangle with specified character", () => {
     const { screen, feed } = makeScreen({ cols: 20, rows: 5 })
     feed("\x1b[88;1;1;3;5$x") // fill rows 1-3, cols 1-5 with 'X' (88)
