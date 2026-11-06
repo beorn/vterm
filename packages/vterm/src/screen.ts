@@ -1304,7 +1304,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let colorSchemeReporting = false
 
   // Additional DEC/xterm private modes we track (and report via DECRPM)
-  let decColumnMode = false // ?3 — DECCOLM (80/132 columns). We don't switch width, just track.
+  let decColumnMode = false // ?3 — DECCOLM (80/132 columns).
   let altScrollMode = false // ?1007
   let utf8MouseMode = false // ?1005
   // Kept outside Snapshot: a restored snapshot starts with nothing saved.
@@ -2414,11 +2414,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         markScreenRowsDirty(t, Math.min(b, rows - 1))
       } else if (finalByte === "z" || finalByte === "{") {
         // DECERA — Erase Rectangular Area (finalByte 'z')
-        // DECSERA — Selective Erase Rectangular Area (finalByte '{', treated identically in headless mode)
+        // DECSERA — Selective Erase Rectangular Area (finalByte '{').
         const { t, l, b, r } = normalizeRect(parts[0] ?? 1, parts[1] ?? 1, parts[2] ?? rows, parts[3] ?? cols)
         for (let row = t; row <= b && row < rows; row++) {
           const gr = itemAt(grid, row, "rectangular fill rows")
           for (let col = l; col <= r && col < cols; col++) {
+            if (finalByte === "{" && gr.getCellRaw(col).protected) continue
             gr.setEmpty(col)
           }
         }
@@ -2907,6 +2908,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           lineAttrs = altLineAttrs
           markAllDirty() // whole visible buffer swapped
         } else if (!set && useAltScreen) {
+          if (code === 1047) {
+            altGrid = makeGrid(cols, rows)
+            altSoftWrapped = new Array<boolean>(rows).fill(false)
+            altLineAttrs = new Array<number>(rows).fill(0)
+          }
           useAltScreen = false
           grid = mainGrid
           softWrapped = mainSoftWrapped
@@ -2978,11 +2984,18 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       case 2031: // Color scheme reporting
         colorSchemeReporting = set
         break
-      case 3: // DECCOLM — 80/132 column. We track it & clear the screen (per DEC spec).
+      case 3: // DECCOLM — clear the page, select 80/132 columns and home.
         decColumnMode = set
         for (let row = 0; row < rows; row++) {
           eraseCells(row, 0, row, cols - 1)
         }
+        softWrapped.fill(false)
+        lineAttrs.fill(0)
+        resize(set ? 132 : 80, rows)
+        scrollTop = 0
+        scrollBottom = rows - 1
+        leftMargin = 0
+        rightMargin = cols - 1
         curX = 0
         curY = 0
         break
@@ -3038,9 +3051,15 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         if (ps === 6) {
           // DECXCPR — Extended Cursor Position Report
           onResponse(`\x1b[?${curY + 1};${curX + 1}n`)
-        } else if (ps === 997) {
-          // Color scheme report: 1 = dark, 2 = light
-          onResponse("\x1b[?997;1n")
+        } else if (ps === 996) {
+          // Query 996, reply 997. Use the same default background as OSC 11.
+          const bg = defaultBgColor ?? { r: 0, g: 0, b: 0 }
+          const linear = (channel: number) => {
+            const value = channel / 255
+            return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
+          }
+          const luminance = 0.2126 * linear(bg.r) + 0.7152 * linear(bg.g) + 0.0722 * linear(bg.b)
+          onResponse(`\x1b[?997;${luminance < 0.5 ? 1 : 2}n`)
         }
       }
       return
@@ -3639,10 +3658,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         break
       case 133: {
         // Semantic prompt markers (FinalTerm / shell integration)
-        // Value format: "X" or "X;params" where X is A/B/C/D
+        // Value format: "X" or "X;params". P starts a prompt at the current position.
         const marker = value.charAt(0)
         switch (marker) {
           case "A": // Start of prompt
+          case "P": // Semantic-prompts StartPrompt (WezTerm dialect)
             semanticZones.push({ type: "prompt", startRow: curY, startCol: curX })
             break
           case "B": // End of prompt / start of command
@@ -3964,6 +3984,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             break
           case "D":
             break
+          case "P":
+            if (value.startsWith("P;Cwd=")) cwd = value.substring(6)
+            break
         }
         break
       }
@@ -4105,6 +4128,21 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       } else {
         // Not recognized
         onResponse("\x1bP0$r\x1b\\")
+      }
+      return
+    }
+
+    // XTGETXRES: only the emulator's own terminal identity is a known resource.
+    if (data.startsWith("+Q") && onResponse) {
+      for (const hexName of data.substring(2).split(";")) {
+        if (/^(?:[0-9a-f]{2})+$/i.test(hexName)) {
+          const name = hexName.replace(/../g, (pair) => String.fromCharCode(parseInt(pair, 16)))
+          if (name === "termName") {
+            onResponse(`\x1bP1+R${hexName}=767465726d\x1b\\`)
+            continue
+          }
+        }
+        onResponse(`\x1bP0+R${hexName}\x1b\\`)
       }
       return
     }

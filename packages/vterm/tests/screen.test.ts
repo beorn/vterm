@@ -1195,6 +1195,13 @@ describe("editing operations", () => {
 // ═══════════════════════════════════════════════════════
 
 describe("mode management", () => {
+  test.each([47, 1047])("alternate mode %i preserves main, and only 1047 clears alt on exit", (mode) => {
+    const screen = screenWith(`MAIN\x1b[?${mode}h\x1b[HALT\x1b[?${mode}l`)
+    expect(screen.getCell(0, 0).char).toBe("M")
+    screen.process(enc.encode(`\x1b[?${mode}h`))
+    expect(screen.getCell(0, 0).char).toBe(mode === 1047 ? "" : "A")
+  })
+
   test("alternate screen", () => {
     const screen = screenWith("hello\x1b[?1049h")
     expect(screen.getMode("altScreen")).toBe(true)
@@ -1534,6 +1541,28 @@ describe("resize", () => {
 // ═══════════════════════════════════════════════════════
 
 describe("semantic prompts (OSC 133)", () => {
+  test("XTGETXRES reports the existing terminal identity and refuses unknown resources", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    screen.process(enc.encode("\x1bP+Q7465726d4e616d65\x1b\\\x1bP+Q6e6f73756368\x1b\\"))
+    expect(responses).toEqual(["\x1bP1+R7465726d4e616d65=767465726d\x1b\\", "\x1bP0+R6e6f73756368\x1b\\"])
+  })
+
+  test("OSC 133 P marks a prompt at the current cursor without moving it", () => {
+    const screen = screenWith("prefix\x1b]133;P\x07")
+    expect(screen.getSemanticZones()).toEqual([{ type: "prompt", startRow: 0, startCol: 6 }])
+    expect(screen.getCursor()).toMatchObject({ row: 0, col: 6 })
+  })
+
+  test("OSC 633 P updates the existing working directory", () => {
+    const screen = screenWith("\x1b]7;file://host/before\x07\x1b]633;P;Cwd=/tmp/one\x07")
+    expect(screen.getCwd()).toBe("/tmp/one")
+    screen.process(enc.encode("\x1b]633;P;Cwd=/tmp/two=three\x1b\\"))
+    expect(screen.getCwd()).toBe("/tmp/two=three")
+    screen.process(enc.encode("\x1b]633;P;Unknown=ignored\x07"))
+    expect(screen.getCwd()).toBe("/tmp/two=three")
+  })
+
   test("OSC 133 semantic prompt markers", () => {
     const screen = createVtermScreen({ cols: 80, rows: 24 })
     screen.process(enc.encode("\x1b]133;A\x07$ \x1b]133;B\x07ls\n\x1b]133;C\x07file1 file2\n\x1b]133;D;0\x07"))
@@ -2272,12 +2301,12 @@ describe("color scheme reporting (mode 2031)", () => {
     expect(responses[1]).toBe("\x1b[?2031;1$y")
   })
 
-  test("DSR 997 responds with dark color scheme", () => {
+  test("DSR 996 reports the OSC 11 background scheme, including reset", () => {
     const responses: string[] = []
     const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
-    // CSI ? 997 n — query color scheme
-    screen.process(enc.encode("\x1b[?997n"))
-    expect(responses[0]).toBe("\x1b[?997;1n") // 1 = dark
+    screen.process(enc.encode("\x1b[?996n\x1b]11;rgb:ff/ff/ff\x07\x1b[?996n"))
+    screen.process(enc.encode("\x1b]111\x07\x1b[?996n\x1b[?997n"))
+    expect(responses).toEqual(["\x1b[?997;1n", "\x1b[?997;2n", "\x1b[?997;1n"])
   })
 
   test("reset clears color scheme reporting", () => {

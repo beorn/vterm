@@ -250,6 +250,14 @@ describe("rectangular area operations", () => {
     }
   })
 
+  test("DECSERA preserves protected cells while DECERA erases them", () => {
+    const { screen, feed } = makeScreen({ cols: 20, rows: 5 })
+    feed('\x1b[1"qP\x1b[0"qABCDZ\x1b[1;1;1;5${')
+    expect(Array.from({ length: 6 }, (_, col) => screen.getCell(0, col).char)).toEqual(["P", "", "", "", "", "Z"])
+    feed("\x1b[1;1;1;1$z")
+    expect(screen.getCell(0, 0).char).toBe("")
+  })
+
   test("DECCRA copies rectangle preserving source", () => {
     const { screen, feed } = makeScreen({ cols: 20, rows: 5 })
     feed("HELLO\x1b[1;1;1;5;1;3;1$v") // copy row 1 cols 1-5 → row 3 col 1
@@ -337,10 +345,15 @@ describe("new mode tracking", () => {
     expect(responses[0]).toMatch(/\x1b\[\?3;2\$y/)
   })
 
-  test("?3 DECCOLM clears screen when toggled", () => {
+  test("?3 DECCOLM resizes and clears screen when toggled", () => {
     const { screen, feed } = makeScreen({ cols: 80, rows: 5 })
     feed("HELLO\x1b[?3h")
     expect(screen.getCell(0, 0).char).not.toBe("H")
+    expect(screen.cols).toBe(132)
+    feed("\x1b[1;132HX\x1b[?3l")
+    expect(screen.cols).toBe(80)
+    expect(screen.getCursor()).toMatchObject({ row: 0, col: 0 })
+    expect(screen.getCell(0, 0).char).toBe("")
   })
 
   test("?1005 utf8 mouse — trackable via DECRPM", () => {
