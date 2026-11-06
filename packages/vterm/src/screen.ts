@@ -3155,7 +3155,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         }
         softWrapped.fill(false)
         lineAttrs.fill(0)
-        resize(set ? 132 : 80, rows)
+        resizeGrid(set ? 132 : 80, rows)
         scrollTop = 0
         scrollBottom = rows - 1
         leftMargin = 0
@@ -3911,6 +3911,19 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       // Only text/plain is supported, so no aliases to other MIME types can be installed.
       abortWrite("EINVAL")
     }
+  }
+
+  function finishOSC(): void {
+    if (oscBuf.length > 8192) {
+      if (oscBuf.startsWith("5522;") && clipboardWrite) {
+        const id = clipboardWrite.id
+        clipboardWrite = null
+        if (onResponse) onResponse(clipboardResponse("write", "EINVAL", id))
+      }
+      return
+    }
+    handleOSC(oscBuf)
+    emitOscEvent(oscBuf)
   }
 
   function handleOSC(oscString: string): void {
@@ -5041,15 +5054,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case "osc":
           if (code === 0x07) {
             // BEL terminates OSC
-            handleOSC(oscBuf)
             parserState = "ground"
-            emitOscEvent(oscBuf)
+            finishOSC()
           } else if (code === 0x1b) {
             // ESC might be start of ST (\x1b\\)
             parserState = "osc_st"
-          } else if (oscBuf.length >= 4096) {
-            parserState = "ground"
-          } else {
+          } else if (oscBuf.length <= 8192) {
+            // A legal OSC 5522 chunk encodes 4096 bytes as 5464 base64 characters.
+            // Keep one overflow sentinel; consume the rest through its terminator.
             oscBuf += ch
           }
           break
@@ -5057,9 +5069,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case "osc_st": {
           // ST (String Terminator) — end of OSC only when the backslash completes ESC \.
           const oscComplete = ch === "\\"
-          if (oscComplete) handleOSC(oscBuf)
           parserState = "ground"
-          if (oscComplete) emitOscEvent(oscBuf)
+          if (oscComplete) finishOSC()
           break
         }
 
@@ -5307,6 +5318,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   }
 
   function resize(newCols: number, newRows: number): void {
+    if (newCols === cols && newRows === rows) return
+    resizeGrid(newCols, newRows)
+    // Only externally applied resizes are separate ops. DECCOLM belongs to its output op.
+    if (opListeners.size > 0) emitOp({ type: "resize", cols: newCols, rows: newRows })
+    flushSignals()
+  }
+
+  function resizeGrid(newCols: number, newRows: number): void {
     // Same-geometry resize is a no-op (xterm parity): reflowing here would
     // clamp a past-the-end deferred-wrap cursor back into the row (so the
     // next byte overwrites the last cell instead of wrapping) and would
@@ -5451,11 +5470,6 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
     clampCursor()
     markAllDirty() // dimensions + reflow changed the whole visible buffer
-
-    // Fire the op tap once for the applied resize (no-op when untapped).
-    if (opListeners.size > 0) emitOp({ type: "resize", cols: newCols, rows: newRows })
-    // Reactive read plane: size$/cursor$ may have changed; damage is "all" (reflow).
-    flushSignals()
   }
 
   // ── Snapshot / restore ──

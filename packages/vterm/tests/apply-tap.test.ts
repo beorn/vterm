@@ -114,6 +114,16 @@ describe("apply(op) — the write seam", () => {
 })
 
 describe("tapOps — the op observation plane", () => {
+  test("DECCOLM inside output records one op and replays scrollback at the original width", () => {
+    const screen = mkScreen(80, 2)
+    const ops = tapOpLog(screen)
+    screen.process(bytes(`${"x".repeat(200)}${ESC}[?3hafter`))
+    const replay = mkScreen(80, 2)
+    for (const op of ops) replay.apply(op)
+    expect(replay.snapshot()).toEqual(screen.snapshot())
+    expect(ops.map((op) => op.type)).toEqual(["output"])
+  })
+
   test("fires exactly once per applied op, in call order, with canonical payloads", () => {
     const screen = mkScreen()
     const ops = tapOpLog(screen)

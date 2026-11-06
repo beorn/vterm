@@ -2452,6 +2452,29 @@ test("OSC 1337 Capabilities answers the official feature-reporting request", () 
 // @level l0
 // @consumer Terminal applications reading/writing the emulator clipboard.
 describe("OSC 5522 — advanced clipboard", () => {
+  test.each(["\x07", "\x1b\\"])("accepts a legal 4096-byte chunk and consumes rejected overflow through %j", (end) => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    const data = "x".repeat(4096)
+    const write = (value: string) => {
+      screen.process(enc.encode(`\x1b]5522;type=write:id=chunk${end}`))
+      screen.process(enc.encode(`\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;${value}`))
+      screen.process(enc.encode(end))
+      screen.process(enc.encode(`\x1b]5522;type=wdata${end}`))
+    }
+    write(btoa(data))
+    expect(screen.getClipboard()).toBe(data)
+    screen.process(enc.encode(`\x1b]52;c;?${end}`))
+    expect(responses.at(-1)).toBe(`\x1b]52;c;${btoa(data)}\x1b\\`)
+    responses.length = 0
+    write("A".repeat(13000))
+    expect(screen.getClipboard()).toBe(data)
+    expect(responses).toEqual(["\x1b]5522;type=write:status=EINVAL:id=chunk\x1b\\"])
+    expect(screen.getText().trim()).toBe("")
+    write(btoa("recovered"))
+    expect(screen.getClipboard()).toBe("recovered")
+  })
+
   test.each([
     ["ASCII", "hello", "aGVsbG8="],
     ["non-ASCII", "☃", "4piD"],
