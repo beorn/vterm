@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.13.2
+
+- vterm.js now implements `XTSAVE` (`CSI ? Pm s`) and `XTRESTORE` (`CSI ? Pm r`)
+  for its supported boolean DEC private modes (`1`, `2`, `3`, `4`, `5`, `6`,
+  `7`, `12`, `25`, `45`, `47`, `66`, `67`, `69`, `1000`, `1002`, `1003`, `1004`,
+  `1005`, `1006`, `1007`, `1015`, `1016`, `1047`, `1049`, `2004`, `2026`, `2027`),
+  saving and restoring per-mode state, skipping modes already at their saved
+  state on restore, clearing saved state on reset, and ignoring unhandled
+  private CSI sequences instead of treating non-`h` final bytes as `DECRST`.
+- vt100.js and vt220.js behavior is unchanged; their versions advance with the
+  shared release.
+
 ## 0.13.1
 
 - vt100.js and vt220.js now report each ignored DECSET/DECRST parameter

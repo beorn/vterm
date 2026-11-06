@@ -2873,6 +2873,25 @@ describe("XTSAVE / XTRESTORE (CSI ? Pm s / CSI ? Pm r) and non-DECSET/DECRST pri
     expect(screen.getMode("autoWrap")).toBe(true)
   })
 
+  test("XTSAVE / XTRESTORE (?1049) saves and restores altScreen state and skips unchanged ?1049", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 4 })
+    const encoder = new TextEncoder()
+
+    // Save ?1049 off on main screen, switch to alt screen, restore -> back on main screen
+    screen.process(encoder.encode("main\x1b[?1049s\x1b[?1049halt\x1b[?1049r"))
+    expect(screen.getMode("altScreen")).toBe(false)
+    expect(screen.getText().split("\n")[0]).toBe("main")
+
+    // Save ?1049 on while in alt screen, restoring while already on alt screen does not clear alt buffer
+    screen.process(encoder.encode("\x1b[?1049halt\x1b[?1049s\x1b[?1049r"))
+    expect(screen.getMode("altScreen")).toBe(true)
+    expect(screen.getText().split("\n")[0]).toBe("alt")
+
+    // Leave alt screen (?1049l) then restore saved ?1049 on (?1049r) -> enters alt screen
+    screen.process(encoder.encode("\x1b[?1049l\x1b[?1049r"))
+    expect(screen.getMode("altScreen")).toBe(true)
+  })
+
   test("unhandled private CSI final bytes or intermediates do not reset DEC private modes", () => {
     const screen = createVtermScreen({ cols: 20, rows: 4 })
     const encoder = new TextEncoder()
