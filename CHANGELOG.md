@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.13.1
+
+- vt100.js and vt220.js now report each ignored DECSET/DECRST parameter
+  through the existing `getUnhandledSequences()` reader, with codes such as
+  `?1000h` and `?1000l`. Ignored CSI #P/#Q report `#P`/`#Q` separately.
+- Handled modes, other private/intermediate commands and existing SGR/OSC
+  behavior are unchanged. A missing report still makes no support decision.
+- vterm.js behavior is unchanged; its version advances with the shared release.
+
 ## 0.13.0
 
 - vt100.js and vt220.js add `Screen.getUnhandledSequences()`: copied, ordered
