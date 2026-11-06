@@ -2,9 +2,17 @@
 
 ## Unreleased
 
-- DECCOLM honours the ?40 column-switching gate. The gate starts open for
+- DECCOLM now switches the actual grid to 80 or 132 columns, so embedders observe
+  a size change. It honours the ?40 column-switching gate. The gate starts open for
   compatibility with existing callers; a real terminal may start it closed.
   A closed gate leaves the screen untouched. Snapshots preserve the gate.
+- Application text in query replies omits C0, DEL and C1 control characters;
+  notification and graphics identifiers use Kitty's restricted character set.
+  Clean values keep their existing reply bytes. Invalid XTGETXRES names receive
+  a refusal without echoing the name.
+- OSC payloads accept up to 8192 code units. Longer sequences stay consumed
+  through their terminator instead of becoming screen text; the earlier parser
+  dropped to ground after 4096 code units.
 - OSC 99 delivers completed title/body notifications through getNotifications.
   OSC 5522 implements text/plain transfers using the same clipboard as OSC 52.
   With mode 5522 set, encodePaste(text) updates that clipboard and returns a

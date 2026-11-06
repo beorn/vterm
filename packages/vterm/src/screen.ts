@@ -2441,7 +2441,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       } else if ((finalByte === "{" || finalByte === "p") && sgrStack.length < 10) {
         const { protected: _protection, url: _url, ...savedAttrs } = cloneAttrsSnapshot(attrs)
         sgrStack.push({ attrs: savedAttrs, parameters: params === "" ? [] : parts })
-      } else if (finalByte === "}") {
+      } else if (finalByte === "}" || finalByte === "q") {
         const entry = sgrStack.pop()
         if (entry) {
           const saved = entry.attrs
@@ -2633,7 +2633,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           const end = attributeChangeExtent === 2 || row === b ? r : cols - 1
           for (let col = start; col <= end && col < cols; col++) {
             const cell = gr.getCellRaw(col)
-            if (cell.char === "") {
+            const wideTail = cell.char === "" && col > 0 && gr.getCellRaw(col - 1).wide
+            if (cell.char === "" && !wideTail) {
               if (attributeChangeExtent !== 2) continue
               cell.char = " "
             }
@@ -2798,10 +2799,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             onResponse(`\x1b[8;${rows};${cols}t`)
             break
           case 20:
-            onResponse(`\x1b]L${iconLabel}\x1b\\`)
+            onResponse(`\x1b]L${replyText(iconLabel)}\x1b\\`)
             break
           case 21:
-            onResponse(`\x1b]l${title}\x1b\\`)
+            onResponse(`\x1b]l${replyText(title)}\x1b\\`)
             break
         }
         break
@@ -3842,6 +3843,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   // ── OSC handler ──
 
+  function replyIdentifier(value: string): string {
+    return value.replace(/[^a-zA-Z0-9_+.-]/g, "")
+  }
+
+  function replyText(value: string): string {
+    return value.replace(/[\x00-\x1f\x7f-\x9f]/g, "")
+  }
+
   function oscFields(value: string): { metadata: Record<string, string>; payload: string } {
     const separator = value.indexOf(";")
     const header = separator < 0 ? value : value.slice(0, separator)
@@ -3864,7 +3873,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   function handleNotification(value: string): void {
     const { metadata, payload } = oscFields(value)
     const kind = metadata.p ?? "title"
-    const id = metadata.i ?? "0"
+    const id = replyIdentifier(metadata.i ?? "0")
     if (kind === "?") {
       if (onResponse) onResponse(`\x1b]99;i=${id}:p=?;o=always:p=title,body\x1b\\`)
       return
@@ -3895,7 +3904,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   function handleClipboard(value: string): void {
     const { metadata, payload } = oscFields(value)
-    const id = (metadata.id ?? "").replace(/[^a-zA-Z0-9_+.-]/g, "")
+    const id = replyIdentifier(metadata.id ?? "")
     const reply = (type: string, status: string, requestId: string, extra = "", data?: string) => {
       if (onResponse) onResponse(clipboardResponse(type, status, requestId, extra, data))
     }
@@ -4285,7 +4294,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
               clipboard = ""
             }
             if (onResponse) {
-              onResponse(`\x1b]52;c;${data}\x1b\\`)
+              onResponse(`\x1b]52;c;${replyText(data)}\x1b\\`)
             }
           }
         }
@@ -4342,7 +4351,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       case 701:
         // rxvt-unicode locale query/set. Query returns the current locale.
         if (value === "?") {
-          if (onResponse) onResponse(`\x1b]701;${locale}\x1b\\`)
+          if (onResponse) onResponse(`\x1b]701;${replyText(locale)}\x1b\\`)
         } else if (value !== "") {
           locale = value
         }
@@ -4451,12 +4460,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     // XTGETXRES: only the emulator's own terminal identity is a known resource.
     if (data.startsWith("+Q") && onResponse) {
       for (const hexName of data.substring(2).split(";")) {
-        if (/^(?:[0-9a-f]{2})+$/i.test(hexName)) {
-          const name = hexName.replace(/../g, (pair) => String.fromCharCode(parseInt(pair, 16)))
-          if (name === "termName") {
-            onResponse(`\x1bP1+R${hexName}=767465726d\x1b\\`)
-            continue
-          }
+        if (!/^(?:[0-9a-f]{2})+$/i.test(hexName)) {
+          onResponse("\x1bP0+R\x1b\\")
+          continue
+        }
+        const name = hexName.replace(/../g, (pair) => String.fromCharCode(parseInt(pair, 16)))
+        if (name === "termName") {
+          onResponse(`\x1bP1+R${hexName}=767465726d\x1b\\`)
+          continue
         }
         onResponse(`\x1bP0+R${hexName}\x1b\\`)
       }
@@ -4502,13 +4513,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     // Handle query action. q=1 suppresses the OK acknowledgement only;
     // q=2 suppresses errors too (kitty quiet rules).
     if (params.a === "q" && onResponse) {
+      const id = replyIdentifier(params.i ?? "0")
       if (kittyGraphicsImages) {
-        if (params.q !== "1" && params.q !== "2") onResponse(`\x1b_Gi=${params.i ?? "0"};OK\x1b\\`)
+        if (params.q !== "1" && params.q !== "2") onResponse(`\x1b_Gi=${id};OK\x1b\\`)
       } else if (params.q !== "2") {
         // The protocol page names no unsupported code (measured 2026-10-27: 0 ENOTSUP,
         // 0 ENOSYS, 4 EINVAL); ENOTSUP is the conventional errno-style name, not protocol
         // text, and EINVAL is refused by name because the query is well formed.
-        onResponse(`\x1b_Gi=${params.i ?? "0"};ENOTSUP\x1b\\`)
+        onResponse(`\x1b_Gi=${id};ENOTSUP\x1b\\`)
       }
     }
   }

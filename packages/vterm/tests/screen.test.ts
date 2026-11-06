@@ -20,6 +20,61 @@ function screenWith(input: string, opts?: Parameters<typeof createVtermScreen>[0
   return screen
 }
 
+// @failure Application output must not inject control bytes into replies sent back to a PTY.
+// @level l0
+// @consumer Embedders forwarding onResponse to terminal input.
+describe("application fields in replies", () => {
+  test.each([
+    {
+      name: "OSC 99 id",
+      clean: "id_+.-7",
+      sequence: (v: string) => `\x1b]99;i=${v}:p=?;\x1b\\`,
+      expected: "\x1b]99;i=id_+.-7:p=?;o=always:p=title,body\x1b\\",
+    },
+    {
+      name: "XTGETXRES name",
+      clean: "7465726d4e616d65",
+      sequence: (v: string) => `\x1bP+Q${v}\x1b\\`,
+      expected: "\x1bP1+R7465726d4e616d65=767465726d\x1b\\",
+      hostileExpected: "\x1bP0+R\x1b\\",
+    },
+    {
+      name: "title",
+      clean: "café☃",
+      sequence: (v: string) => `\x1b]2;${v}\x07\x1b[21t`,
+      expected: "\x1b]lcafé☃\x1b\\",
+    },
+    { name: "icon", clean: "icon", sequence: (v: string) => `\x1b]1;${v}\x07\x1b[20t`, expected: "\x1b]Licon\x1b\\" },
+    {
+      name: "locale",
+      clean: "en_US.UTF-8",
+      sequence: (v: string) => `\x1b]701;${v}\x07\x1b]701;?\x07`,
+      expected: "\x1b]701;en_US.UTF-8\x1b\\",
+    },
+    {
+      name: "APC G id",
+      clean: "7",
+      sequence: (v: string) => `\x1b_Ga=q,i=${v};\x1b\\`,
+      expected: "\x1b_Gi=7;ENOTSUP\x1b\\",
+    },
+    {
+      name: "OSC 52 acknowledgement",
+      clean: "Y2xlYW4=",
+      sequence: (v: string) => `\x1b]52;c;${v}\x07`,
+      expected: "\x1b]52;c;Y2xlYW4=\x1b\\",
+    },
+  ])("$name keeps clean bytes and removes hostile field controls", ({ clean, sequence, expected, hostileExpected }) => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (reply) => responses.push(reply) })
+    screen.process(enc.encode(sequence(clean)))
+    expect(responses).toEqual([expected])
+    responses.length = 0
+    const hostile = clean.slice(0, 1) + "\x00\t\n\r\x7f\u0080\u009f" + clean.slice(1)
+    screen.process(enc.encode(sequence(hostile)))
+    expect(responses).toEqual([hostileExpected ?? expected])
+  })
+})
+
 // ═══════════════════════════════════════════════════════
 // §9 naming ruling — canonical names only (aliases deleted)
 // ═══════════════════════════════════════════════════════
@@ -1204,15 +1259,18 @@ describe("mode management", () => {
     expect(screen.getCursor()).toMatchObject({ row: 1, col: 0 })
   })
 
-  test("SGR stack restores nested and selected video attributes without restoring protection", () => {
-    const screen = screenWith("\x1b[1m\x1b[#{\x1b[22;3m\x1b[#{\x1b[23m\x1b[#}A\x1b[#}B")
-    expect(screen.getCell(0, 0)).toMatchObject({ bold: false, italic: true })
-    expect(screen.getCell(0, 1)).toMatchObject({ bold: true, italic: false })
-    screen.process(enc.encode('\x1b[1#p\x1b[22;3m\x1b[1"q\x1b[#}C'))
-    expect(screen.getCell(0, 2)).toMatchObject({ bold: true, italic: true, protected: true })
-    screen.process(enc.encode("\x1b[#}D"))
-    expect(screen.getCell(0, 3)).toMatchObject({ bold: true, italic: true })
-  })
+  test.each(["}", "q"])(
+    "SGR stack restores nested and selected video attributes without restoring protection (%s)",
+    (pop) => {
+      const screen = screenWith(`\x1b[1m\x1b[#{\x1b[22;3m\x1b[#{\x1b[23m\x1b[#${pop}A\x1b[#${pop}B`)
+      expect(screen.getCell(0, 0)).toMatchObject({ bold: false, italic: true })
+      expect(screen.getCell(0, 1)).toMatchObject({ bold: true, italic: false })
+      screen.process(enc.encode(`\x1b[1#p\x1b[22;3m\x1b[1"q\x1b[#${pop}C`))
+      expect(screen.getCell(0, 2)).toMatchObject({ bold: true, italic: true, protected: true })
+      screen.process(enc.encode(`\x1b[#${pop}D`))
+      expect(screen.getCell(0, 3)).toMatchObject({ bold: true, italic: true })
+    },
+  )
 
   test.each([47, 1047])("alternate mode %i preserves main, and only 1047 clears alt on exit", (mode) => {
     const screen = screenWith(`MAIN\x1b[?${mode}h\x1b[HALT\x1b[?${mode}l`)

@@ -313,6 +313,16 @@ describe("rectangular area operations", () => {
     }
   })
 
+  test.each([0, 2])("attribute extent %i preserves wide-glyph tails while changing their attributes", (extent) => {
+    const { screen, feed } = makeScreen({ cols: 20, rows: 5 })
+    feed(`世x\x1b[${extent}*x\x1b[1;1;1;3;1$r`)
+    expect([0, 1, 2].map((col) => screen.getCell(0, col).char)).toEqual(["世", "", "x"])
+    expect([0, 1, 2].map((col) => screen.getCell(0, col).bold)).toEqual([true, true, true])
+    feed("\x1b[1;1;1;3;1$t")
+    expect([0, 1, 2].map((col) => screen.getCell(0, col).char)).toEqual(["世", "", "x"])
+    expect([0, 1, 2].map((col) => screen.getCell(0, col).bold)).toEqual([false, false, false])
+  })
+
   test("DECRQCRA responds with checksum DCS", () => {
     const { responses, feed } = makeScreen()
     feed("ABCDE\x1b[1;1;1;1;1;5*y") // checksum of row 1 cols 1-5, pid=1
