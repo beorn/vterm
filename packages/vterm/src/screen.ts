@@ -92,6 +92,8 @@ export interface ScreenOptions {
   cols?: number
   rows?: number
   scrollbackLimit?: number
+  /** Host-declared cell size in pixels, as positive integers. Absent: pixel replies stay unknown. */
+  pixelGeometry?: { readonly cellWidth: number; readonly cellHeight: number }
   /**
    * The embedder renders or relays kitty graphics images, so this screen may
    * claim them: graphics queries answer OK and the kittyGraphics mode is true.
@@ -1203,6 +1205,19 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let scrollbackLimit = options.scrollbackLimit ?? 1000
   const onResponse = options.onResponse
   const kittyGraphicsImages = options.kittyGraphicsImages ?? false
+  const pixelGeometry = options.pixelGeometry
+  const cellWidth = pixelGeometry?.cellWidth ?? 0
+  const cellHeight = pixelGeometry?.cellHeight ?? 0
+  if (pixelGeometry !== undefined) {
+    for (const [name, value] of [
+      ["cellWidth", cellWidth],
+      ["cellHeight", cellHeight],
+    ] as const) {
+      if (!Number.isInteger(value) || value <= 0) {
+        throw new RangeError(`pixelGeometry.${name} must be a positive integer, got ${value}`)
+      }
+    }
+  }
   const maxStringSequenceLength = options.maxStringSequenceLength ?? DEFAULT_MAX_STRING_SEQUENCE_LENGTH
   if (!Number.isSafeInteger(maxStringSequenceLength) || maxStringSequenceLength < 0) {
     throw new RangeError("maxStringSequenceLength must be a non-negative safe integer")
@@ -2614,10 +2629,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         if (!onResponse) break
         switch (op) {
           case 14:
-            onResponse("\x1b[4;0;0t")
+            onResponse(`\x1b[4;${rows * cellHeight};${cols * cellWidth}t`)
             break
           case 16:
-            onResponse("\x1b[6;0;0t")
+            onResponse(`\x1b[6;${cellHeight};${cellWidth}t`)
             break
           case 18:
             onResponse(`\x1b[8;${rows};${cols}t`)
@@ -3054,6 +3069,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
     if (finalByte === "K") {
       handleEraseLine(parts[0] ?? 0, true)
+      return
+    }
+
+    // XTSMGRAPHICS — report sixel geometry only when the host declared pixels.
+    if (finalByte === "S") {
+      if (parts.length === 3 && parts[0] === 2 && parts[1] === 1 && parts[2] === 0 && pixelGeometry !== undefined) {
+        if (onResponse) onResponse(`\x1b[?2;0;${cols * cellWidth};${rows * cellHeight}S`)
+      }
       return
     }
 
@@ -4013,8 +4036,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         break
       }
       case 776:
-        // rxvt-unicode cell metrics: width ; height ; ascent, all unknown without a font.
-        if (onResponse) onResponse("\x1b]776;0;0;0\x1b\\")
+        // rxvt-unicode cell metrics: width ; height ; ascent (still unknown).
+        if (onResponse) onResponse(`\x1b]776;${cellWidth};${cellHeight};0\x1b\\`)
         break
       case 7770: {
         // mintty font size query/set. Query returns a restorable set sequence.
@@ -4069,8 +4092,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       case 1337: {
         // iTerm2 proprietary sequences
         if (value === "ReportCellSize" && onResponse) {
-          // Physical cell dimensions are unknown without a font.
-          onResponse("\x1b]1337;ReportCellSize=0;0\x1b\\")
+          // iTerm2 reports height before width; both stay zero without a declaration.
+          onResponse(`\x1b]1337;ReportCellSize=${cellHeight};${cellWidth}\x1b\\`)
         } else if (value === "Capabilities" && onResponse) {
           // Report empty capabilities (protocol supported, no iTerm2-specific features)
           onResponse("\x1b]1337;Capabilities=\x1b\\")

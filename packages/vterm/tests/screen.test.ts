@@ -2376,6 +2376,69 @@ describe("OSC 701/702/776 — rxvt-unicode queries", () => {
 // OSC 1337 — iTerm2 cell size
 // ═══════════════════════════════════════════════════════
 
+describe("host-declared pixel geometry", () => {
+  test.each([
+    ["XTWINOPS 14", "\x1b[14t", "\x1b[4;384;640t"],
+    ["XTWINOPS 16", "\x1b[16t", "\x1b[6;16;8t"],
+    ["OSC 1337", "\x1b]1337;ReportCellSize\x1b\\", "\x1b]1337;ReportCellSize=16;8\x1b\\"],
+    ["OSC 776", "\x1b]776\x07", "\x1b]776;8;16;0\x1b\\"],
+    ["sixel geometry", "\x1b[?2;1;0S", "\x1b[?2;0;640;384S"],
+  ])("%s replies from the declared cell size", (_name, query, reply) => {
+    const responses: string[] = []
+    const screen = createVtermScreen({
+      cols: 80,
+      rows: 24,
+      pixelGeometry: { cellWidth: 8, cellHeight: 16 },
+      onResponse: (response) => responses.push(response),
+    })
+    screen.process(enc.encode(query))
+    expect(responses).toEqual([reply])
+  })
+
+  // The existing OSC 776/1337 tests below pin their no-option bytes.
+  test.each([
+    ["XTWINOPS 14", "\x1b[14t", ["\x1b[4;0;0t"]],
+    ["XTWINOPS 16", "\x1b[16t", ["\x1b[6;0;0t"]],
+    ["sixel geometry", "\x1b[?2;1;0S", []],
+  ] as const)("%s preserves the no-option reply", (_name, query, replies) => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (response) => responses.push(response) })
+    screen.process(enc.encode(query))
+    expect(responses).toEqual(replies)
+  })
+
+  test.each([0, -1, 1.5, NaN, Infinity])("rejects non-positive-integer dimensions %s", (value) => {
+    expect(() => createVtermScreen({ pixelGeometry: { cellWidth: value, cellHeight: 16 } })).toThrow(
+      /pixelGeometry.cellWidth.*positive integer/,
+    )
+    expect(() => createVtermScreen({ pixelGeometry: { cellWidth: 8, cellHeight: value } })).toThrow(
+      /pixelGeometry.cellHeight.*positive integer/,
+    )
+  })
+
+  test("window and sixel dimensions follow resize without changing cell size", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({
+      cols: 80,
+      rows: 24,
+      pixelGeometry: { cellWidth: 8, cellHeight: 16 },
+      onResponse: (response) => responses.push(response),
+    })
+    const query = enc.encode("\x1b[14t\x1b[?2;1;0S\x1b[16t")
+    screen.process(query)
+    screen.resize(100, 30)
+    screen.process(query)
+    expect(responses).toEqual([
+      "\x1b[4;384;640t",
+      "\x1b[?2;0;640;384S",
+      "\x1b[6;16;8t",
+      "\x1b[4;480;800t",
+      "\x1b[?2;0;800;480S",
+      "\x1b[6;16;8t",
+    ])
+  })
+})
+
 test("OSC 1337 ReportCellSize reports unknown physical dimensions", () => {
   const responses: string[] = []
   const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
