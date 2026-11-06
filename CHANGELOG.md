@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.14.0
+
+- vterm.js adds the optional pixelGeometry setting for embedders to supply
+  cell dimensions used by pixel-size query replies. Without it, those replies
+  retain their existing zero dimensions.
+- vt100.js and vt220.js behavior is unchanged; their versions advance with the
+  shared release.
 
 - DECCOLM now switches the actual grid to 80 or 132 columns, so embedders observe
   a size change. It honours the ?40 column-switching gate. The gate starts open for
