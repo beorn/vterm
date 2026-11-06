@@ -2448,42 +2448,126 @@ test("OSC 1337 Capabilities answers the official feature-reporting request", () 
 // OSC 5522 — Advanced Clipboard (Kitty protocol)
 // ═══════════════════════════════════════════════════════
 
+// @failure Real typed OSC 5522 transfers must share OSC 52 state and preserve it on invalid writes.
+// @level l0
+// @consumer Terminal applications reading/writing the emulator clipboard.
 describe("OSC 5522 — advanced clipboard", () => {
-  test("store and query clipboard data", () => {
+  test.each([
+    ["ASCII", "hello", "aGVsbG8="],
+    ["non-ASCII", "☃", "4piD"],
+    ["empty", "", ""],
+  ])(
+    "extensions.osc5522-clipboard: %s paste emits exact Kitty frames, overrides 2004 and reads back",
+    (_label, text, encoded) => {
+      const responses: string[] = []
+      const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+      screen.process(enc.encode("\x1b[?2004h\x1b[?5522h"))
+      const saved = screen.snapshot()
+      const expected =
+        "\x1b]5522;type=read:status=OK\x1b\\" +
+        "\x1b]5522;type=read:status=DATA:mime=Lg==" +
+        (text ? ";dGV4dC9wbGFpbgo=" : "") +
+        "\x1b\\\x1b]5522;type=read:status=DONE\x1b\\"
+      expect(new TextDecoder().decode(screen.encodePaste(text))).toBe(expected)
+      screen.process(enc.encode("\x1b]52;c;?\x07\x1b]5522;type=read;dGV4dC9wbGFpbg==\x07"))
+      expect(responses[0]).toBe(`\x1b]52;c;${encoded}\x1b\\`)
+      expect(responses.filter((frame) => frame.includes("type=read:status=DATA"))).toEqual(
+        text ? [`\x1b]5522;type=read:status=DATA:mime=dGV4dC9wbGFpbg==;${encoded}\x1b\\`] : [],
+      )
+      screen.process(enc.encode("\x1b[?5522l"))
+      screen.restore(saved)
+      expect(new TextDecoder().decode(screen.encodePaste(text))).toBe(expected)
+      screen.reset()
+      expect(new TextDecoder().decode(screen.encodePaste(text))).toBe(text)
+    },
+  )
+
+  test.each([false, true])(
+    "extensions.osc5522-clipboard: mode off preserves bytes with bracketed paste %s",
+    (bracketed) => {
+      const screen = createVtermScreen()
+      if (bracketed) screen.process(enc.encode("\x1b[?2004h"))
+      const text = "paste\n☃"
+      expect(new TextDecoder().decode(screen.encodePaste(text))).toBe(bracketed ? `\x1b[200~${text}\x1b[201~` : text)
+    },
+  )
+
+  test("chunked write and typed read share OSC 52 clipboard, preserve ids and advertise real mode", () => {
     const responses: string[] = []
     const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
-    // Store "hello" (base64: aGVsbG8=)
-    screen.process(enc.encode("\x1b]5522;aGVsbG8=\x1b\\"))
-    // Query
-    screen.process(enc.encode("\x1b]5522;?\x1b\\"))
-    expect(responses[0]).toBe("\x1b]5522;aGVsbG8=\x1b\\")
+    screen.process(enc.encode("\x1b]5522;type=write:id=w\x1b\\"))
+    screen.process(enc.encode("\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;aG\x1b\\"))
+    screen.process(enc.encode("\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;VsbG8=\x1b\\"))
+    expect(screen.getClipboard()).toBe("")
+    screen.process(enc.encode("\x1b]5522;type=wdata\x1b\\"))
+    expect(screen.getClipboard()).toBe("hello")
+    screen.process(enc.encode("\x1b]52;c;?\x07\x1b]5522;type=read:id=r;dGV4dC9wbGFpbg==\x1b\\"))
+    screen.process(enc.encode("\x1b[?5522$p\x1b[?5522h\x1b[?5522$p"))
+    expect(responses).toEqual([
+      "\x1b]5522;type=write:status=DONE:id=w\x1b\\",
+      "\x1b]52;c;aGVsbG8=\x1b\\",
+      "\x1b]5522;type=read:status=OK:id=r\x1b\\",
+      "\x1b]5522;type=read:status=DATA:id=r:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1b\\",
+      "\x1b]5522;type=read:status=DONE:id=r\x1b\\",
+      "\x1b[?5522;2$y",
+      "\x1b[?5522;1$y",
+    ])
   })
 
-  test("query empty clipboard", () => {
+  test.each([
+    ["text/plain", "%%%="],
+    ["text/plain", "aGVsbG8"],
+    ["image/png", "AA=="],
+  ])("refuses invalid or unsupported write %s/%s without replacing clipboard", (mime, data) => {
     const responses: string[] = []
     const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
-    screen.process(enc.encode("\x1b]5522;?\x1b\\"))
-    // btoa("") === ""
-    expect(responses[0]).toBe("\x1b]5522;\x1b\\")
+    screen.process(enc.encode("\x1b]52;c;a2VlcA==\x07"))
+    responses.length = 0
+    screen.process(enc.encode("\x1b]5522;type=write:id=bad\x07"))
+    screen.process(enc.encode(`\x1b]5522;type=wdata:mime=${btoa(mime)};${data}\x07`))
+    screen.process(enc.encode("\x1b]5522;type=wdata\x07"))
+    expect(screen.getClipboard()).toBe("keep")
+    expect(responses).toEqual(["\x1b]5522;type=write:status=EINVAL:id=bad\x1b\\"])
   })
 
-  test("store with BEL terminator", () => {
-    const responses: string[] = []
-    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
-    // Store "test" (base64: dGVzdA==)
-    screen.process(enc.encode("\x1b]5522;dGVzdA==\x07"))
-    // Query
-    screen.process(enc.encode("\x1b]5522;?\x07"))
-    expect(responses[0]).toBe("\x1b]5522;dGVzdA==\x1b\\")
-  })
-
-  test("reset clears advanced clipboard", () => {
-    const responses: string[] = []
-    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
-    screen.process(enc.encode("\x1b]5522;aGVsbG8=\x1b\\"))
+  test("restore discards unfinished transfer while retaining completed clipboard and mode", () => {
+    const screen = screenWith("\x1b]52;c;a2VlcA==\x07\x1b[?5522h")
+    const saved = screen.snapshot()
+    screen.process(enc.encode("\x1b]5522;type=write\x07\x1b]5522;type=wdata:mime=dGV4dC9wbGFpbg==;bmV3\x07"))
+    screen.restore(saved)
+    screen.process(enc.encode("\x1b]5522;type=wdata\x07"))
+    expect(screen.getClipboard()).toBe("keep")
+    expect(Reflect.get(screen.snapshot().modes, "clipboardPasteEvents")).toBe(true)
     screen.reset()
-    screen.process(enc.encode("\x1b]5522;?\x1b\\"))
-    expect(responses[0]).toBe("\x1b]5522;\x1b\\")
+    expect(screen.getClipboard()).toBe("")
+    expect(Reflect.get(screen.snapshot().modes, "clipboardPasteEvents")).toBe(false)
+  })
+})
+
+// @failure Query-only OSC 99 support must not stand in for completed notification delivery.
+// @level l0
+// @consumer Applications using Kitty notifications via the existing notification reader.
+describe("OSC 99 — notifications", () => {
+  test("query echoes id and multipart notifications deliver through the existing store", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    screen.process(enc.encode("\x1b]9;legacy\x07\x1b]99;i=query:p=?;\x1b\\"))
+    screen.process(enc.encode("\x1b]99;i=a:d=0;Title\x1b\\"))
+    expect(screen.getNotifications()).toEqual(["legacy"])
+    screen.process(enc.encode("\x1b]99;i=b:p=body;Other\x1b\\"))
+    screen.process(enc.encode("\x1b]99;i=a:p=body:e=1;4piD\x1b\\"))
+    expect(screen.getNotifications()).toEqual(["legacy", "Other", "Title\n☃"])
+    expect(responses).toEqual(["\x1b]99;i=query:p=?;o=always:p=title,body\x1b\\"])
+  })
+
+  test.each(["restore", "reset"])("%s discards unfinished notification assembly", (action) => {
+    const screen = createVtermScreen()
+    const saved = screen.snapshot()
+    screen.process(enc.encode("\x1b]99;i=a:d=0;Stale title\x07"))
+    if (action === "restore") screen.restore(saved)
+    else screen.reset()
+    screen.process(enc.encode("\x1b]99;i=a:p=body;Body\x07"))
+    expect(screen.getNotifications()).toEqual(["Body"])
   })
 })
 

@@ -255,6 +255,7 @@ export interface Snapshot {
     /** Independent encoding flags; absent in older version-1 snapshots means reset. */
     urxvtMouse?: boolean
     pixelMouse?: boolean
+    clipboardPasteEvents?: boolean
     /** Absent in older version-1 snapshots: reset. */
     reverseWrap?: boolean
     smoothScroll?: boolean
@@ -512,7 +513,11 @@ export interface Screen {
   readonly signals: ScreenSignals
 
   process(data: Uint8Array): void
-  /** Encode UTF-8 paste using this screen's mode 2004; preserve newline bytes. */
+  /**
+   * Encode paste preserving UTF-8/newlines. Mode 5522 takes priority over 2004:
+   * it updates the shared clipboard and emits a MIME-list paste event.
+   * With mode 5522 off, encode ordinary or bracketed paste without that side effect.
+   */
   encodePaste(text: string): Uint8Array
   resize(cols: number, rows: number): void
   /**
@@ -1278,6 +1283,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let sgrMouse = false
   let urxvtMouse = false
   let pixelMouse = false
+  let clipboardPasteEvents = false
   let focusTracking = false
   let originMode = false
   let insertMode = false
@@ -1578,7 +1584,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       assertBoolean(`modes.${name}`, modes[name])
     }
     assertInteger("modes.mouseTrackingMode", modes.mouseTrackingMode)
-    for (const name of ["urxvtMouse", "pixelMouse", "reverseWrap", "smoothScroll"]) {
+    for (const name of ["urxvtMouse", "pixelMouse", "reverseWrap", "smoothScroll", "clipboardPasteEvents"]) {
       if (Object.hasOwn(modes, name)) assertBoolean(`modes.${name}`, modes[name])
     }
     if (Object.hasOwn(modes, "attributeChangeExtent") && ![0, 1, 2].includes(modes.attributeChangeExtent as number)) {
@@ -1736,8 +1742,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // Locale query state (OSC 701)
   let locale = "en_US.UTF-8"
 
-  // Advanced clipboard (OSC 5522 — Kitty clipboard protocol)
-  let advancedClipboard = ""
+  // OSC 5522 transfer assembly is transient; completed text shares OSC 52's clipboard.
+  let clipboardWrite: { id: string; data: string; hasText: boolean } | null = null
 
   // Viewport scroll offset
   let viewportOffset = 0
@@ -1755,6 +1761,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   // Notifications (OSC 9)
   let notifications: string[] = []
+  const notificationAssembly = new Map<string, { title: string; body: string }>()
 
   // Semantic prompt zones (OSC 133 / OSC 633)
   let semanticZones: SemanticZone[] = []
@@ -2974,6 +2981,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   function privateModeState(mode: number): boolean | null {
     switch (mode) {
+      case 5522:
+        return clipboardPasteEvents
       case 4:
         return smoothScroll
       case 45:
@@ -3030,6 +3039,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   function applyPrivateMode(code: number, set: boolean): void {
     switch (code) {
+      case 5522:
+        clipboardPasteEvents = set
+        break
       case 4:
         smoothScroll = set
         break
@@ -3791,6 +3803,116 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   // ── OSC handler ──
 
+  function oscFields(value: string): { metadata: Record<string, string>; payload: string } {
+    const separator = value.indexOf(";")
+    const header = separator < 0 ? value : value.slice(0, separator)
+    const metadata = Object.fromEntries(
+      header.split(":").flatMap((field) => {
+        const equals = field.indexOf("=")
+        return equals < 0 ? [] : [[field.slice(0, equals), field.slice(equals + 1)]]
+      }),
+    )
+    return { metadata, payload: separator < 0 ? "" : value.slice(separator + 1) }
+  }
+
+  function decodeBase64(value: string): string | null {
+    // OSC 5522 requires padded RFC 4648 input; atob alone tolerates malformed data.
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) return null
+    const decoded = atob(value)
+    return btoa(decoded) === value ? decoded : null
+  }
+
+  function handleNotification(value: string): void {
+    const { metadata, payload } = oscFields(value)
+    const kind = metadata.p ?? "title"
+    const id = metadata.i ?? "0"
+    if (kind === "?") {
+      if (onResponse) onResponse(`\x1b]99;i=${id}:p=?;o=always:p=title,body\x1b\\`)
+      return
+    }
+    if (kind !== "title" && kind !== "body") return
+    const bytes =
+      metadata.e === "1"
+        ? decodeBase64(payload)
+        : Array.from(encoder.encode(payload), (byte) => String.fromCharCode(byte)).join("")
+    if (bytes === null) return
+    const entry = notificationAssembly.get(id) ?? { title: "", body: "" }
+    entry[kind] += bytes
+    if (metadata.d === "0") {
+      notificationAssembly.set(id, entry)
+      return
+    }
+    notificationAssembly.delete(id)
+    const text = (data: string) =>
+      new TextDecoder().decode(Uint8Array.from(data, (character) => character.charCodeAt(0)))
+    const title = text(entry.title)
+    const body = text(entry.body)
+    if (title || body) notifications.push(title && body ? `${title}\n${body}` : title || body)
+  }
+
+  function clipboardResponse(type: string, status: string, requestId: string, extra = "", data?: string): string {
+    return `\x1b]5522;type=${type}:status=${status}${requestId ? `:id=${requestId}` : ""}${extra}${data === undefined || data === "" ? "" : `;${data}`}\x1b\\`
+  }
+
+  function handleClipboard(value: string): void {
+    const { metadata, payload } = oscFields(value)
+    const id = (metadata.id ?? "").replace(/[^a-zA-Z0-9_+.-]/g, "")
+    const reply = (type: string, status: string, requestId: string, extra = "", data?: string) => {
+      if (onResponse) onResponse(clipboardResponse(type, status, requestId, extra, data))
+    }
+    const abortWrite = (status: string) => {
+      if (clipboardWrite) reply("write", status, clipboardWrite.id)
+      clipboardWrite = null
+    }
+    if (metadata.type === "read") {
+      const requested = decodeBase64(payload)
+      if (requested === null) return // Invalid read requests have no protocol error status.
+      if (metadata.loc && metadata.loc !== "clipboard") {
+        reply("read", "ENOSYS", id)
+        return
+      }
+      reply("read", "OK", id)
+      for (const mime of new Set(requested.split(/\s+/))) {
+        if (mime === ".") {
+          reply("read", "DATA", id, ":mime=Lg==", clipboard ? btoa("text/plain\n") : "")
+        } else if (mime === "text/plain") {
+          for (let offset = 0; offset < clipboard.length; offset += 4096) {
+            reply("read", "DATA", id, ":mime=dGV4dC9wbGFpbg==", btoa(clipboard.slice(offset, offset + 4096)))
+          }
+        }
+        // Unavailable MIME types produce no DATA packet, between the mandatory OK/DONE.
+      }
+      reply("read", "DONE", id)
+    } else if (metadata.type === "write") {
+      clipboardWrite = { id, data: "", hasText: false }
+      if (metadata.loc && metadata.loc !== "clipboard") abortWrite("ENOSYS")
+      else if (payload) abortWrite("EINVAL")
+    } else if (metadata.type === "wdata" && clipboardWrite) {
+      if (metadata.mime === undefined) {
+        if (payload) {
+          abortWrite("EINVAL")
+          return
+        }
+        const data = clipboardWrite.hasText ? decodeBase64(clipboardWrite.data) : ""
+        if (data === null) {
+          abortWrite("EINVAL")
+          return
+        }
+        clipboard = data
+        reply("write", "DONE", clipboardWrite.id)
+        clipboardWrite = null
+      } else if (decodeBase64(metadata.mime) === "text/plain") {
+        clipboardWrite.hasText = true
+        clipboardWrite.data += payload
+      } else {
+        abortWrite("EINVAL")
+      }
+    } else if (metadata.type === "walias" && clipboardWrite) {
+      // Only text/plain is supported, so no aliases to other MIME types can be installed.
+      abortWrite("EINVAL")
+    }
+  }
+
   function handleOSC(oscString: string): void {
     // OSC sequences may have no semicolon (bare resets like "110", "104").
     // Split at the first semicolon if one exists; otherwise treat the whole
@@ -4120,6 +4242,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       case 9: // Notifications: OSC 9 ; message ST (iTerm2/ConEmu convention)
         notifications.push(value)
         break
+      case 99:
+        handleNotification(value)
+        break
       case 633: {
         // VS Code shell integration (OSC 633 is a superset of OSC 133)
         // Maps to the same semantic zone model as FinalTerm markers.
@@ -4225,19 +4350,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         break
       }
       case 5522: {
-        // OSC 5522 — Advanced Clipboard (Kitty clipboard protocol)
-        if (value === "?" && onResponse) {
-          // Query: respond with stored clipboard data
-          const encoded = btoa(advancedClipboard)
-          onResponse(`\x1b]5522;${encoded}\x1b\\`)
-        } else {
-          // Store clipboard data (base64-encoded)
-          try {
-            advancedClipboard = atob(value)
-          } catch {
-            advancedClipboard = ""
-          }
-        }
+        handleClipboard(value)
         break
       }
       case 1337: {
@@ -4351,6 +4464,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // ── Soft reset (DECSTR) ──
 
   function softReset(): void {
+    clipboardPasteEvents = false
+    clipboardWrite = null
+    notificationAssembly.clear()
     reverseWrap = false
     smoothScroll = false
     attributeChangeExtent = 0
@@ -4397,6 +4513,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // ── Full reset ──
 
   function fullReset(): void {
+    clipboardPasteEvents = false
+    clipboardWrite = null
+    notificationAssembly.clear()
     reverseWrap = false
     smoothScroll = false
     attributeChangeExtent = 0
@@ -4462,7 +4581,6 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     fontSize = 12
     fontWindowSize = 12
     locale = "en_US.UTF-8"
-    advancedClipboard = ""
     viewportOffset = 0
     charsetG0 = false
     charsetG1 = false
@@ -5394,6 +5512,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         sgrMouse,
         urxvtMouse,
         pixelMouse,
+        clipboardPasteEvents,
         reverseWrap,
         smoothScroll,
         attributeChangeExtent,
@@ -5508,6 +5627,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     sgrMouse = snapshotValue.modes.sgrMouse
     urxvtMouse = snapshotValue.modes.urxvtMouse ?? false
     pixelMouse = snapshotValue.modes.pixelMouse ?? false
+    clipboardPasteEvents = snapshotValue.modes.clipboardPasteEvents ?? false
     reverseWrap = snapshotValue.modes.reverseWrap ?? false
     smoothScroll = snapshotValue.modes.smoothScroll ?? false
     attributeChangeExtent = snapshotValue.modes.attributeChangeExtent ?? 0
@@ -5574,7 +5694,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     fontSize = 12
     fontWindowSize = 12
     locale = "en_US.UTF-8"
-    advancedClipboard = ""
+    clipboardWrite = null
+    notificationAssembly.clear()
     semanticZones = []
     hasSixel = false
     sixelImages = []
@@ -5998,7 +6119,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   }
 
   // Suppress unused variable warnings
-  void [mouseTrackingMode, textScale, advancedClipboard]
+  void [mouseTrackingMode, textScale]
 
   return {
     get cols() {
@@ -6011,7 +6132,16 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       return getSignals()
     },
     process,
-    encodePaste: (text) => encodePaste(text, bracketedPaste),
+    encodePaste: (text) => {
+      if (!clipboardPasteEvents) return encodePaste(text, bracketedPaste)
+      clipboard = Array.from(encoder.encode(text), (byte) => String.fromCharCode(byte)).join("")
+      // No password: this in-memory clipboard has no permission prompt.
+      return encoder.encode(
+        clipboardResponse("read", "OK", "") +
+          clipboardResponse("read", "DATA", "", ":mime=Lg==", clipboard ? btoa("text/plain\n") : "") +
+          clipboardResponse("read", "DONE", ""),
+      )
+    },
     resize,
     apply,
     tapOps,

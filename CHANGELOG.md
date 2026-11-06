@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- OSC 99 delivers completed title/body notifications through getNotifications.
+  OSC 5522 implements text/plain transfers using the same clipboard as OSC 52.
+  With mode 5522 set, encodePaste(text) updates that clipboard and returns a
+  MIME-list paste event; it takes priority over bracketed-paste mode 2004.
+  Mode-off paste bytes retain their existing encoding.
 - vterm.js implements reverse wraparound, smooth-scroll mode readback, SGR
   push/pop and the non-indexed CSI color stack using its existing palette store.
   New mode and SGR stack snapshot fields are optional version-1 header members;
