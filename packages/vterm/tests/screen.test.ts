@@ -2802,3 +2802,53 @@ test("mode readback distinguishes tracked set/reset from an untracked mode", () 
   }
   expect(screen.getMode("untracked-mode")).toBeNull()
 })
+
+// @failure XTSAVE (CSI ? Pm s), XTRESTORE (CSI ? Pm r), or another private CSI falls through to DECRST and resets the mode (#32481).
+// @level l0
+// @consumer Terminal mode readers and XTSAVE/XTRESTORE probes, including Termless and Terminfo.
+describe("XTSAVE / XTRESTORE (CSI ? Pm s / CSI ? Pm r) and non-DECSET/DECRST private CSI (#32481)", () => {
+  test("CSI ? 7 s (XTSAVE) does not reset DECAWM when autoWrap is on", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 4 })
+    const encoder = new TextEncoder()
+    screen.process(encoder.encode("\x1b[?7h"))
+    expect(screen.getMode("autoWrap")).toBe(true)
+
+    screen.process(encoder.encode("\x1b[?7s"))
+    expect(screen.getMode("autoWrap")).toBe(true)
+  })
+
+  test("XTSAVE (CSI ? Pm s) and XTRESTORE (CSI ? Pm r) save, overwrite, and restore DEC private modes", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 4 })
+    const encoder = new TextEncoder()
+
+    // Save OFF, set ON, restore -> OFF
+    screen.process(encoder.encode("\x1b[?7l\x1b[?7s\x1b[?7h\x1b[?7r"))
+    expect(screen.getMode("autoWrap")).toBe(false)
+
+    // Save ON, set OFF, restore -> ON
+    screen.process(encoder.encode("\x1b[?7h\x1b[?7s\x1b[?7l\x1b[?7r"))
+    expect(screen.getMode("autoWrap")).toBe(true)
+
+    // Overwrite saved state: save ON, set OFF, save OFF, set ON, restore -> OFF
+    screen.process(encoder.encode("\x1b[?7h\x1b[?7s\x1b[?7l\x1b[?7s\x1b[?7h\x1b[?7r"))
+    expect(screen.getMode("autoWrap")).toBe(false)
+
+    // Multi-parameter save/restore (DECCKM ?1 and DECAWM ?7)
+    screen.process(encoder.encode("\x1b[?1h\x1b[?7h\x1b[?1;7s\x1b[?1l\x1b[?7l\x1b[?1;7r"))
+    expect(screen.getMode("applicationCursor")).toBe(true)
+    expect(screen.getMode("autoWrap")).toBe(true)
+  })
+
+  test("unhandled private CSI final bytes or intermediates do not reset DEC private modes", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 4 })
+    const encoder = new TextEncoder()
+    screen.process(encoder.encode("\x1b[?1h\x1b[?7h"))
+    expect(screen.getMode("applicationCursor")).toBe(true)
+    expect(screen.getMode("autoWrap")).toBe(true)
+
+    screen.process(encoder.encode("\x1b[?1$l\x1b[?7$h\x1b[?1;7S"))
+    expect(screen.getMode("applicationCursor")).toBe(true)
+    expect(screen.getMode("autoWrap")).toBe(true)
+  })
+})
+
