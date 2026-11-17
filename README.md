@@ -6,15 +6,15 @@ VT terminal emulator monorepo. Pure TypeScript, zero dependencies.
 
 | Package                     | npm                                                  | Description                                                                      |
 | --------------------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------- |
-| [vt100.js](packages/vt100/) | [`vt100.js`](https://www.npmjs.com/package/vt100.js) | Strict VT100 — monochrome, cursor, scroll regions, DA1/DSR                       |
-| [vt220.js](packages/vt220/) | [`vt220.js`](https://www.npmjs.com/package/vt220.js) | VT220 — monochrome, insert/delete, selective erase, soft reset                  |
+| [vt100.js](packages/vt100/) | [`vt100.js`](https://www.npmjs.com/package/vt100.js) | Strict VT100 — monochrome. SGR pages 3-14 and 3-27; cursor page 3-14            |
+| [vt220.js](packages/vt220/) | [`vt220.js`](https://www.npmjs.com/package/vt220.js) | VT220 — monochrome. SGR §4.9.1 pages 4-28; insert lines §4.11 page 4-30         |
 | [vterm.js](packages/vterm/) | [`vterm.js`](https://www.npmjs.com/package/vterm.js) | Modern terminal emulator — 100% of [terminfo.dev](https://terminfo.dev) features |
 
 ## Why three packages?
 
-**vt100.js** is the strict baseline — a monochrome DEC VT100 (1978) emulator with bold, underline, blink, and inverse. No colors, no insert/delete operations. Fast and minimal.
+**vt100.js** is the strict baseline — a monochrome DEC VT100 (EK-VT100-UG-001, August 1978). SGR on pages 3-27 and 3-14 is reset, bold, underline, blink and inverse (Ps 0, 1, 4, 5 and 7). Any other parameter value is ignored, so there is no colour.
 
-**vt220.js** adds the editing and reset controls its README lists: insert/delete characters and lines, selective erase, and soft reset. Rendition stays monochrome. VT220 SGR is EK-VT220-RM-001 §4.9.1, pages 4-28: Ps 0, 1, 4, 5, 7, 22, 24, 25 and 27. That list has no Ps 8 and no colour parameters, so there is no conceal and no eight-colour SGR. Insert lines are §4.11, page 4-30.
+**vt220.js** stays monochrome. VT220 SGR is EK-VT220-RM-001 §4.9.1, pages 4-28: Ps 0, 1, 4, 5, 7, 22, 24, 25 and 27. That list has no Ps 8 and no colour parameters, so there is no conceal and no eight-colour SGR. Insert lines are §4.11, page 4-30. Cursor save and restore are §4.7, pages 4-26 and 4-27. IND, NEL and RI are §4.7, page 4-26. DECTCEM is §4.6.7, page 4-20.
 
 **vterm.js** is comprehensive — it targets 100% coverage of the [terminfo.dev feature matrix](https://terminfo.dev): every SGR attribute, every cursor mode, every DEC private mode, every OSC/DCS sequence, device attribute responses, mouse tracking, synchronized output, text reflow, and Unicode rendering (emoji ZWJ, regional indicators, variation selectors).
 
@@ -24,7 +24,7 @@ Use vt100.js for strict VT100 conformance. Use vt220.js for most terminal testin
 
 ```bash
 npm install vt100.js    # Strict VT100 emulator (monochrome)
-npm install vt220.js    # VT220 emulator (monochrome, insert/delete)
+npm install vt220.js    # VT220 emulator (monochrome)
 npm install vterm.js    # Modern full-featured emulator
 ```
 

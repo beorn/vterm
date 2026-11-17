@@ -6,17 +6,14 @@ Part of the [vterm](https://github.com/beorn/vterm) monorepo.
 
 ## Features
 
-- Strict DEC VT100 (1978) emulation — monochrome display
-- SGR operands: reset (0), bold (1), underline (4), blink (5), inverse (7)
-- Cursor movement (CUP, CUU, CUD, CUF, CUB, HVP)
-- Cursor save/restore (DECSC/DECRC)
-- Erase display/line (ED/EL)
-- Scroll regions (DECSTBM) with content preservation
-- Index/reverse index/next line (IND/RI/NEL)
-- Scrollback buffer with configurable limit
-- Screen modes (auto-wrap, origin mode)
-- DEC special graphics charset
-- DA1/DSR/CPR device responses
+- Strict DEC VT100 (EK-VT100-UG-001, August 1978) — monochrome display
+- SGR on pages 3-27 and 3-14: reset (0), bold (1), underline (4), blink (5), inverse (7). Any other parameter value is ignored.
+- Cursor movement on page 3-14: CUP, CUU, CUD, CUF, CUB and HVP
+- Cursor save (DECSC) page 3-23 and restore (DECRC) page 3-22
+- Erase in display (ED) page 3-25, operands 0, 1 and 2
+- Index, reverse index and next line (IND/RI/NEL) page 3-26
+- Five character sets (SCS) page 3-27
+- Cursor and status reports page 3-15
 - Zero dependencies — works in Bun, Node.js, and browsers
 
 Unsupported controls are ignored, including CHA/VPA/CNL/CPL, CSI s/u,
