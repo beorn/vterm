@@ -117,7 +117,7 @@ interface ScreenCell {
   underline: boolean
   blink: boolean
   inverse: boolean
-  hidden: boolean
+  hidden: boolean // always false; conceal is not a VT100 attribute
 }
 ```
 
