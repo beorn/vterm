@@ -14,7 +14,7 @@ VT terminal emulator monorepo. Pure TypeScript, zero dependencies.
 
 **vt100.js** is the strict baseline — a monochrome DEC VT100 (1978) emulator with bold, underline, blink, and inverse. No colors, no insert/delete operations. Fast and minimal.
 
-**vt220.js** adds the editing and reset controls its README lists: insert/delete characters and lines, selective erase, and soft reset. Rendition stays monochrome. There is no eight-colour SGR and no conceal. The set is VT100 User Guide EK-VT100-UG-001 and VT220 Programmer Reference EK-VT220-RM-001.
+**vt220.js** adds the editing and reset controls its README lists: insert/delete characters and lines, selective erase, and soft reset. Rendition stays monochrome. VT220 SGR is EK-VT220-RM-001 §4.9.1, pages 4-28: Ps 0, 1, 4, 5, 7, 22, 24, 25 and 27. That list has no Ps 8 and no colour parameters, so there is no conceal and no eight-colour SGR. Insert lines are §4.11, page 4-30.
 
 **vterm.js** is comprehensive — it targets 100% coverage of the [terminfo.dev feature matrix](https://terminfo.dev): every SGR attribute, every cursor mode, every DEC private mode, every OSC/DCS sequence, device attribute responses, mouse tracking, synchronized output, text reflow, and Unicode rendering (emoji ZWJ, regional indicators, variation selectors).
 
