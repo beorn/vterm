@@ -1,7 +1,0 @@
-{
-  "modules": ["release", "verify", "format-check", "oxfmt"],
-  "vars": {
-    "testCommand": "bun run test",
-    "buildStep": ""
-  }
-}
